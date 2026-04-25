@@ -68,4 +68,4 @@ FkCensor.exe
 
 ## Лицензия
 
-MIT License
+[MIT License](LICENSE)
