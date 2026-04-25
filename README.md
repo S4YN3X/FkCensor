@@ -1,5 +1,9 @@
 # FkCensor (Обход цензуры Яндекс Музыка)
 
+[![Downloads](https://img.shields.io/github/downloads/S4YN3X/FkCensor/total?style=flat-square&color=4CAF50&label=Downloads)](https://github.com/S4YN3X/FkCensor/releases)
+[![Latest Release](https://img.shields.io/github/v/release/S4YN3X/FkCensor?style=flat-square&color=2196F3&label=Latest%20Release)](https://github.com/S4YN3X/FkCensor/releases/latest)
+[![Windows](https://img.shields.io/badge/Windows-10%2F11-0078D6?style=flat-square&logo=windows)](https://github.com/S4YN3X/FkCensor/releases)
+
 Патчер Яндекс Музыки, который автоматически заменяет недоступные треки на рабочие версии.
 
 ## Как это работает
