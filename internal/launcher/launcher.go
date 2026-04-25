@@ -9,8 +9,6 @@ import (
 	"time"
 )
 
-// YMExePath возвращает путь к исполняемому файлу Яндекс Музыки в зависимости от ОС.
-// Пути взяты из PulseSync-client/src/main/utils/appUtils/index.ts
 func YMExePath() (string, error) {
 	switch runtime.GOOS {
 	case "windows":
@@ -22,16 +20,18 @@ func YMExePath() (string, error) {
 	case "darwin":
 		return "/Applications/Яндекс Музыка.app/Contents/MacOS/Яндекс Музыка", nil
 	case "linux":
-		// Стандартный путь из PulseSync; может отличаться при нестандартной установке
 		return "/opt/Яндекс Музыка/yandex-music", nil
 	default:
 		return "", fmt.Errorf("unsupported OS: %s", runtime.GOOS)
 	}
 }
 
-// LaunchWithDebugPort запускает Яндекс Музыку с указанным remote-debugging-port.
-// Если YM уже запущена — возвращает ошибку (нужно сначала закрыть).
 func LaunchWithDebugPort(port int) error {
+	kill := exec.Command("taskkill", "/F", "/IM", "Яндекс Музыка.exe")
+	hideWindow(kill)
+	kill.Run()
+	time.Sleep(1 * time.Second)
+
 	exePath, err := YMExePath()
 	if err != nil {
 		return fmt.Errorf("getting YM path: %w", err)
@@ -55,19 +55,17 @@ func LaunchWithDebugPort(port int) error {
 
 	cmd.Stdout = nil
 	cmd.Stderr = nil
+	hideWindow(cmd)
 
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("failed to start Yandex Music: %w", err)
 	}
 
-	// Отсоединяем от нашего процесса — YM живёт самостоятельно
 	if err := cmd.Process.Release(); err != nil {
 		return fmt.Errorf("failed to release process: %w", err)
 	}
 
 	fmt.Printf("[launcher] Yandex Music started (PID detached), debug port: %d\n", port)
-
-	// Даём время на запуск перед первым CDP-подключением
 	time.Sleep(3 * time.Second)
 	return nil
 }

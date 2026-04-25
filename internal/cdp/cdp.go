@@ -11,16 +11,14 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-// Tab представляет вкладку/окно в Electron-приложении (CDP target).
 type Tab struct {
-	ID               string `json:"id"`
-	Title            string `json:"title"`
-	URL              string `json:"url"`
+	ID                   string `json:"id"`
+	Title                string `json:"title"`
+	URL                  string `json:"url"`
 	WebSocketDebuggerURL string `json:"webSocketDebuggerUrl"`
-	Type             string `json:"type"`
+	Type                 string `json:"type"`
 }
 
-// Client — CDP-клиент для одной вкладки.
 type Client struct {
 	conn    *websocket.Conn
 	msgID   int
@@ -38,7 +36,6 @@ type cdpMessage struct {
 	} `json:"error,omitempty"`
 }
 
-// ListTabs запрашивает список вкладок у CDP-сервера по указанному порту.
 func ListTabs(port int) ([]Tab, error) {
 	url := fmt.Sprintf("http://localhost:%d/json", port)
 	resp, err := http.Get(url)
@@ -55,8 +52,6 @@ func ListTabs(port int) ([]Tab, error) {
 	return tabs, nil
 }
 
-// FindYMTab ищет вкладку с Яндекс Музыкой среди доступных таргетов.
-// YM — это page-тип с URL music.yandex.* или заголовком, содержащим "Яндекс Музыка".
 func FindYMTab(tabs []Tab) *Tab {
 	for i := range tabs {
 		t := &tabs[i]
@@ -69,7 +64,6 @@ func FindYMTab(tabs []Tab) *Tab {
 			return t
 		}
 	}
-	// Fallback: первый page-тип (у Electron обычно одна страница)
 	for i := range tabs {
 		if tabs[i].Type == "page" {
 			return &tabs[i]
@@ -78,7 +72,6 @@ func FindYMTab(tabs []Tab) *Tab {
 	return nil
 }
 
-// Connect подключается к конкретной вкладке по WebSocket URL.
 func Connect(wsURL string) (*Client, error) {
 	dialer := websocket.DefaultDialer
 	conn, _, err := dialer.Dial(wsURL, nil)
@@ -108,7 +101,6 @@ func (c *Client) readLoop() {
 		}
 		if ch, ok := c.pending[msg.ID]; ok {
 			if msg.Error != nil {
-				// Отправляем nil чтобы вызвавший увидел ошибку через отдельный механизм
 				ch <- nil
 			} else {
 				ch <- msg.Result
@@ -118,7 +110,6 @@ func (c *Client) readLoop() {
 	}
 }
 
-// call отправляет CDP-команду и ждёт ответа.
 func (c *Client) call(method string, params interface{}) (json.RawMessage, error) {
 	id := c.msgID
 	c.msgID++
@@ -144,23 +135,20 @@ func (c *Client) call(method string, params interface{}) (json.RawMessage, error
 	}
 }
 
-// Evaluate выполняет JS-скрипт в контексте вкладки.
 func (c *Client) Evaluate(script string) error {
 	_, err := c.call("Runtime.evaluate", map[string]interface{}{
-		"expression":            script,
-		"awaitPromise":          false,
-		"returnByValue":         false,
+		"expression":                  script,
+		"awaitPromise":                false,
+		"returnByValue":               false,
 		"allowUnsafeEvalBlockedByCSP": true,
 	})
 	return err
 }
 
-// Close закрывает WebSocket-соединение.
 func (c *Client) Close() {
 	c.conn.Close()
 }
 
-// WaitForTabs ожидает появления хотя бы одной вкладки в CDP (с ретраями).
 func WaitForTabs(port int, maxRetries int, delay time.Duration) ([]Tab, error) {
 	for i := 0; i < maxRetries; i++ {
 		tabs, err := ListTabs(port)
