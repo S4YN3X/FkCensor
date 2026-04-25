@@ -15,7 +15,6 @@ tidy:
 clean:
 	rm -f $(BINARY)
 
-# Кросс-компиляция
 build-all: build-windows build-linux build-darwin
 
 build-windows:
