@@ -4,6 +4,7 @@ go 1.25.0
 
 require (
 	github.com/getlantern/systray v1.2.2
+	github.com/jchv/go-webview2 v0.0.0-20260205173254-56598839c808
 	golang.org/x/sys v0.43.0
 )
 
@@ -15,5 +16,6 @@ require (
 	github.com/getlantern/hidden v0.0.0-20190325191715-f02dbb02be55 // indirect
 	github.com/getlantern/ops v0.0.0-20190325191751-d70cb0d6f85f // indirect
 	github.com/go-stack/stack v1.8.0 // indirect
+	github.com/jchv/go-winloader v0.0.0-20250406163304-c1995be93bd1 // indirect
 	github.com/oxtoacart/bpool v0.0.0-20190530202638-03653db5a59c // indirect
 )

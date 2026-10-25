@@ -9,8 +9,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
+	"time"
 )
 
 const patchMarker = "/* FkCensor patched */"
@@ -25,6 +25,10 @@ func readASAR(path string) (headerJSON []byte, fileData []byte, err error) {
 	if err != nil {
 		return nil, nil, err
 	}
+	return splitASAR(data)
+}
+
+func splitASAR(data []byte) (headerJSON []byte, fileData []byte, err error) {
 	if len(data) < 16 {
 		return nil, nil, fmt.Errorf("file too small")
 	}
@@ -53,27 +57,6 @@ func writeASAR(headerJSON, fileData []byte) []byte {
 	}
 	buf.Write(fileData)
 	return buf.Bytes()
-}
-
-func DebugListRootFiles(asarPath string) {
-	headerJSON, fileData, err := readASAR(asarPath)
-	if err != nil {
-		fmt.Println("read error:", err)
-		return
-	}
-	_ = fileData
-
-	type entry struct {
-		Size  *int                       `json:"size"`
-		Files map[string]json.RawMessage `json:"files"`
-	}
-	var root entry
-	json.Unmarshal(headerJSON, &root)
-
-	fmt.Println("[asarpatch] Root files:")
-	for name := range root.Files {
-		fmt.Println(" -", name)
-	}
 }
 
 func updateJSONOffsets(headerJSON []byte, targetOffset string, delta int, newSize int, newContent []byte) ([]byte, error) {
@@ -296,106 +279,111 @@ func patchFile(headerJSON []byte, fileData []byte, targetPath string, newContent
 
 var hashCachePath = filepath.Join(os.Getenv("LOCALAPPDATA"), "FkCensor", "original_hash.txt")
 
-func ASARPath() (string, error) {
-	switch runtime.GOOS {
-	case "windows":
-		base := os.Getenv("LOCALAPPDATA")
-		candidates := []string{
-			filepath.Join(base, "Programs", "YandexMusic", "resources", "app.asar"),
-			filepath.Join(base, "Programs", "Яндекс Музыка", "resources", "app.asar"),
-			filepath.Join(base, "Programs", "Yandex Music", "resources", "app.asar"),
-		}
-		for _, c := range candidates {
-			if _, err := os.Stat(c); err == nil {
-				return c, nil
-			}
-		}
-		programsDir := filepath.Join(base, "Programs")
-		entries, _ := os.ReadDir(programsDir)
-		for _, e := range entries {
-			if !e.IsDir() {
-				continue
-			}
-			n := strings.ToLower(e.Name())
-			if strings.Contains(n, "yandex") || strings.Contains(n, "яндекс") {
-				c := filepath.Join(programsDir, e.Name(), "resources", "app.asar")
-				if _, err := os.Stat(c); err == nil {
-					return c, nil
-				}
-			}
-		}
-		return "", fmt.Errorf("app.asar not found in %s", programsDir)
-	case "darwin":
-		for _, c := range []string{
-			"/Applications/Яндекс Музыка.app/Contents/Resources/app.asar",
-			"/Applications/Yandex Music.app/Contents/Resources/app.asar",
-		} {
-			if _, err := os.Stat(c); err == nil {
-				return c, nil
-			}
-		}
-		return "", fmt.Errorf("app.asar not found")
-	default:
-		for _, c := range []string{
-			"/opt/YandexMusic/resources/app.asar",
-			"/opt/Яндекс Музыка/resources/app.asar",
-			"/usr/share/yandex-music/resources/app.asar",
-		} {
-			if _, err := os.Stat(c); err == nil {
-				return c, nil
-			}
-		}
-		return "", fmt.Errorf("app.asar not found")
-	}
-}
+// State описывает, что сейчас лежит в app.asar.
+type State int
 
-func IsPatched() bool {
-	asarPath, err := ASARPath()
-	if err != nil {
-		return false
-	}
-	_, fileData, err := readASAR(asarPath)
-	if err != nil {
-		return false
-	}
-	return bytes.Contains(fileData, []byte(patchMarker))
-}
+const (
+	NotPatched State = iota
+	Outdated         // стоит наш патч, но старой версии скрипта
+	Patched
+	Broken // контрольная сумма asar не совпадает с записанной в exe — клиент не запустится
+)
 
-func Patch(injectScript string) error {
-	asarPath, err := ASARPath()
-	if err != nil {
-		return fmt.Errorf("find asar: %w", err)
-	}
-
-	backupPath := asarPath + ".bak"
-	if _, err := os.Stat(backupPath); os.IsNotExist(err) {
-		if err := copyFile(asarPath, backupPath); err != nil {
-			return fmt.Errorf("backup: %w", err)
-		}
-	}
-
+// Inspect проверяет asar: есть ли патч, совпадает ли он с текущим скриптом
+// и сходится ли контрольная сумма с той, что записана в exe.
+func Inspect(asarPath, exePath, injectScript string) (State, error) {
 	headerJSON, fileData, err := readASAR(asarPath)
+	if err != nil {
+		return NotPatched, err
+	}
+	st := NotPatched
+	switch {
+	case bytes.Contains(fileData, []byte(injectScript)):
+		st = Patched
+	case bytes.Contains(fileData, []byte(patchMarker)):
+		st = Outdated
+	}
+	if exe, err := os.ReadFile(exePath); err == nil && !bytes.Contains(exe, []byte(hashHeader(headerJSON))) {
+		// Считаем установку повреждённой, только если в exe лежит одна из известных нам сумм:
+		// у клиента без проверки целостности суммы в exe нет вовсе.
+		for _, h := range knownHashes(asarPath) {
+			if bytes.Contains(exe, []byte(h)) {
+				return Broken, nil
+			}
+		}
+	}
+	return st, nil
+}
+
+// knownHashes — суммы исходного asar (из кэша и бэкапа), которые могли остаться в exe.
+func knownHashes(asarPath string) []string {
+	var hs []string
+	if c, err := os.ReadFile(hashCachePath); err == nil && len(c) > 0 {
+		hs = append(hs, string(c))
+	}
+	if h, _, err := readASAR(asarPath + ".bak"); err == nil {
+		hs = append(hs, hashHeader(h))
+	}
+	return hs
+}
+
+// AppVersion читает версию клиента из package.json внутри asar.
+func AppVersion(asarPath string) string {
+	headerJSON, fileData, err := readASAR(asarPath)
+	if err != nil {
+		return ""
+	}
+	pkgContent, err := findFileContent(headerJSON, fileData, "package.json")
+	if err != nil {
+		return ""
+	}
+	var pkg struct {
+		Version string `json:"version"`
+	}
+	_ = json.Unmarshal(pkgContent, &pkg)
+	return pkg.Version
+}
+
+// Patch ставит патч из любого состояния: на чистый asar, поверх старой версии скрипта
+// или поверх повреждённой установки. Патч собирается из исходного asar (сам файл
+// или бэкап), а контрольная сумма в exe меняется одной записью. Если exe записать
+// не удалось, asar возвращается к прежнему содержимому — клиент продолжит запускаться.
+func Patch(asarPath, exePath, injectScript string) error {
+	current, err := os.ReadFile(asarPath)
 	if err != nil {
 		return fmt.Errorf("read asar: %w", err)
 	}
-	if bytes.Contains(fileData, []byte(patchMarker)) {
-		return nil // уже пропатчен
+	curHeader, curData, err := splitASAR(current)
+	if err != nil {
+		return fmt.Errorf("read asar: %w", err)
 	}
 
-	oldHash := hashHeader(headerJSON)
-	os.MkdirAll(filepath.Dir(hashCachePath), 0755)
-	os.WriteFile(hashCachePath, []byte(oldHash), 0644)
+	original := current
+	if bytes.Contains(curData, []byte(patchMarker)) {
+		if original, err = os.ReadFile(asarPath + ".bak"); err != nil {
+			return fmt.Errorf("бэкап исходного asar не найден: %w", err)
+		}
+	} else if err := writeFileRetry(asarPath+".bak", current); err != nil {
+		// Бэкап обновляем при каждой установке на чистый asar: после обновления клиента
+		// старый бэкап относится к другой версии и восстанавливать его нельзя.
+		return fmt.Errorf("backup: %w", err)
+	}
+	headerJSON, fileData, err := splitASAR(original)
+	if err != nil {
+		return fmt.Errorf("read backup: %w", err)
+	}
+	if bytes.Contains(fileData, []byte(patchMarker)) {
+		return fmt.Errorf("в бэкапе тоже стоит патч — переустановите яндекс музыку")
+	}
 
 	// Находим главный файл через package.json
 	mainFile := findMainFile(headerJSON, fileData)
 	fmt.Printf("[asarpatch] Patching: %s\n", mainFile)
 
-	// Также выведи первые 200 байт оригинала для проверки
 	origContent, err := findFileContent(headerJSON, fileData, mainFile)
 	if err != nil {
 		return fmt.Errorf("find %s: %w", mainFile, err)
 	}
-	fmt.Printf("[asarpatch] First 200 chars:\n%s\n", string(origContent[:min(200, len(origContent))]))
 
 	// Inject ПОСЛЕ оригинала (import'ы должны быть в начале)
 	newContent := append(
@@ -407,58 +395,52 @@ func Patch(injectScript string) error {
 	if err != nil {
 		return fmt.Errorf("patch file: %w", err)
 	}
+	newHash := hashHeader(newHeaderJSON)
+	origHash := hashHeader(headerJSON)
 
-	packed := writeASAR(newHeaderJSON, newFileData)
-
-	if err := os.WriteFile(asarPath, packed, 0644); err != nil {
+	if err := writeFileRetry(asarPath, writeASAR(newHeaderJSON, newFileData)); err != nil {
 		return fmt.Errorf("write asar: %w", err)
 	}
-
-	newHash := hashHeader(newHeaderJSON)
-	if runtime.GOOS == "windows" {
-		if err := updateIntegrityInExe(oldHash, newHash); err != nil {
-			fmt.Printf("[asarpatch] Warning: integrity update failed: %v\n", err)
-		}
+	candidates := append([]string{hashHeader(curHeader), origHash}, knownHashes(asarPath)...)
+	if err := replaceHashInExe(exePath, candidates, newHash); err != nil {
+		_ = writeFileRetry(asarPath, current)
+		return fmt.Errorf("запись контрольной суммы в exe: %w", err)
 	}
 
+	os.MkdirAll(filepath.Dir(hashCachePath), 0755)
+	os.WriteFile(hashCachePath, []byte(origHash), 0644)
 	fmt.Printf("[asarpatch] ASAR patch installed ✓ (main: %s)\n", mainFile)
 	return nil
 }
 
-func Unpatch() error {
-	asarPath, err := ASARPath()
+// Unpatch восстанавливает asar из бэкапа и возвращает исходную сумму в exe.
+func Unpatch(asarPath, exePath string) error {
+	current, err := os.ReadFile(asarPath)
 	if err != nil {
-		return fmt.Errorf("find asar: %w", err)
+		return fmt.Errorf("read asar: %w", err)
 	}
-	backupPath := asarPath + ".bak"
-	if _, err := os.Stat(backupPath); os.IsNotExist(err) {
-		return fmt.Errorf("backup not found at %s", backupPath)
-	}
-
-	currentHeader, _, err := readASAR(asarPath)
+	curHeader, _, err := splitASAR(current)
 	if err != nil {
-		return fmt.Errorf("read current asar: %w", err)
+		return fmt.Errorf("read asar: %w", err)
 	}
-	currentHash := hashHeader(currentHeader)
-
-	originalHashBytes, err := os.ReadFile(hashCachePath)
+	backup, err := os.ReadFile(asarPath + ".bak")
 	if err != nil {
-		backupHeader, _, berr := readASAR(backupPath)
-		if berr != nil {
-			return fmt.Errorf("cannot determine original hash: %w", berr)
-		}
-		originalHashBytes = []byte(hashHeader(backupHeader))
+		return fmt.Errorf("backup not found: %w", err)
 	}
-	originalHash := string(originalHashBytes)
-
-	if err := copyFile(backupPath, asarPath); err != nil {
-		return err
+	bakHeader, bakData, err := splitASAR(backup)
+	if err != nil {
+		return fmt.Errorf("read backup: %w", err)
+	}
+	if bytes.Contains(bakData, []byte(patchMarker)) {
+		return fmt.Errorf("в бэкапе тоже стоит патч — переустановите яндекс музыку")
 	}
 
-	if runtime.GOOS == "windows" && currentHash != originalHash {
-		if err := updateIntegrityInExe(currentHash, originalHash); err != nil {
-			fmt.Printf("[asarpatch] Warning: integrity restore failed: %v\n", err)
-		}
+	if err := writeFileRetry(asarPath, backup); err != nil {
+		return fmt.Errorf("restore asar: %w", err)
+	}
+	if err := replaceHashInExe(exePath, []string{hashHeader(curHeader)}, hashHeader(bakHeader)); err != nil {
+		_ = writeFileRetry(asarPath, current)
+		return fmt.Errorf("запись контрольной суммы в exe: %w", err)
 	}
 
 	os.Remove(hashCachePath)
@@ -466,39 +448,43 @@ func Unpatch() error {
 	return nil
 }
 
-func updateIntegrityInExe(oldHash, newHash string) error {
-	base := os.Getenv("LOCALAPPDATA")
-	exePath := filepath.Join(base, "Programs", "YandexMusic", "Яндекс Музыка.exe")
-
+// replaceHashInExe заменяет в exe первую найденную из candidates сумму на newHash.
+// Если в exe уже стоит newHash, ничего не делает.
+func replaceHashInExe(exePath string, candidates []string, newHash string) error {
 	data, err := os.ReadFile(exePath)
 	if err != nil {
 		return fmt.Errorf("read exe: %w", err)
 	}
-
-	oldBuf := []byte(oldHash)
 	newBuf := []byte(newHash)
-
-	if !bytes.Contains(data, oldBuf) {
-		return fmt.Errorf("old hash not found in exe")
+	for _, old := range candidates {
+		if old == "" || old == newHash || !bytes.Contains(data, []byte(old)) {
+			continue
+		}
+		count := bytes.Count(data, []byte(old))
+		data = bytes.ReplaceAll(data, []byte(old), newBuf)
+		if err := writeFileRetry(exePath, data); err != nil {
+			return fmt.Errorf("write exe: %w", err)
+		}
+		fmt.Printf("[asarpatch] Replaced %d hash occurrences in exe ✓\n", count)
+		return nil
 	}
-
-	count := bytes.Count(data, oldBuf)
-	data = bytes.ReplaceAll(data, oldBuf, newBuf)
-
-	if err := os.WriteFile(exePath, data, 0644); err != nil {
-		return fmt.Errorf("write exe: %w", err)
+	if bytes.Contains(data, newBuf) {
+		return nil
 	}
-
-	fmt.Printf("[asarpatch] Replaced %d hash occurrences in exe ✓\n", count)
-	return nil
+	return fmt.Errorf("контрольная сумма asar не найдена в exe")
 }
 
-func copyFile(src, dst string) error {
-	data, err := os.ReadFile(src)
-	if err != nil {
-		return err
+// writeFileRetry пишет файл, повторяя попытки несколько секунд: только что изменённый
+// exe или asar может ненадолго держать антивирус или сама система.
+func writeFileRetry(path string, data []byte) error {
+	var err error
+	for i := 0; i < 20; i++ {
+		if err = os.WriteFile(path, data, 0644); err == nil {
+			return nil
+		}
+		time.Sleep(250 * time.Millisecond)
 	}
-	return os.WriteFile(dst, data, 0644)
+	return err
 }
 
 func min(a, b int) int {
