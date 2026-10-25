@@ -1,0 +1,412 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FkCensor</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+:root{
+  --bg:#fff; --panel:#f4f4f4; --line:#e6e6e6; --hover:#e6e6e6;
+  --text:#000; --muted:#6b6b6b; --faint:#8a8a8a;
+  --on:#1fb05a; --off:#b5b5b5; --warn:#e0a100;
+  --knob-off:#cfcfcf;
+}
+*{box-sizing:border-box}
+[hidden]{display:none!important}
+html,body{height:100%}
+body{margin:0;background:var(--bg);color:var(--text);font-family:'IBM Plex Mono',Consolas,monospace;-webkit-font-smoothing:antialiased;user-select:none;cursor:default}
+button{font:inherit;color:inherit;border:0;background:none;padding:0;cursor:pointer}
+button:disabled{cursor:default;opacity:.5}
+
+.app{height:100%;display:flex}
+.side{width:92px;background:var(--panel);border-right:1px solid var(--line);display:flex;flex-direction:column;align-items:center;padding:14px 0;gap:6px;flex-shrink:0}
+.logo{font-size:15px;font-weight:700;letter-spacing:-.5px;margin-bottom:12px}
+.logo span{color:var(--faint)}
+.nav{width:72px;padding:10px 0 8px;border-radius:11px;display:flex;flex-direction:column;align-items:center;gap:6px}
+.nav:hover{background:var(--hover)}
+.nav.on{background:#000;color:#fff}
+.nav i{font-style:normal;font-size:16px;line-height:18px;height:18px}
+.nav b{font-size:11px;font-weight:500}
+.side .grow{flex:1}
+.side .ver{font-size:10px;color:var(--muted)}
+
+.main{flex:1;min-width:0;overflow:auto;padding:36px 44px}
+.page{display:none}
+.page.on{display:flex}
+
+/* одна ширина на все вкладки — левый край контента совпадает */
+.col{flex-direction:column;margin:0 auto;width:100%;max-width:640px}
+.label{font-size:12px;font-weight:500;color:var(--muted)}
+.h1{font-size:24px;font-weight:700;letter-spacing:-1px}
+.sub{font-size:12px;color:var(--muted)}
+.card{border-radius:12px;box-shadow:0 0 0 1px var(--line) inset}
+.box{border-radius:12px;background:var(--panel);overflow:hidden}
+.ellipsis{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.btn{padding:10px 16px;border-radius:9px;font-size:12px;font-weight:600;background:var(--panel)}
+.btn:hover:not(:disabled){background:var(--hover)}
+.btn.dark{background:#000;color:#fff}
+.btn.dark:hover:not(:disabled){background:#333}
+.cover{border-radius:8px;flex-shrink:0;background:repeating-linear-gradient(45deg,#f0f0f0 0 6px,#e6e6e6 6px 12px);object-fit:cover;display:block}
+.seg{display:flex;gap:6px;padding:4px;border-radius:10px;background:var(--panel)}
+.seg button{padding:6px 12px;border-radius:7px;font-size:12px;font-weight:500;color:var(--muted)}
+.seg button.on{background:#fff;color:#000;box-shadow:0 1px 2px rgba(0,0,0,.12)}
+.badge{padding:4px 8px;border-radius:6px;font-size:11px;font-weight:600}
+
+/* главная */
+#home{align-items:center;gap:26px;padding-top:28px}
+.hero{display:flex;flex-direction:column;align-items:center;gap:8px}
+.hero .t{font-size:40px;font-weight:700;letter-spacing:-2px;line-height:1}
+.hero .s{font-size:13px;color:var(--muted);text-align:center;text-wrap:pretty}
+.status{width:100%;display:flex;align-items:center;gap:10px;padding:8px 8px 8px 16px;border-radius:12px;background:var(--panel);box-shadow:0 0 0 1px var(--line) inset}
+.dot{width:10px;height:10px;border-radius:50%;flex-shrink:0}
+.status .txt{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px}
+.status .ttl{font-size:14px;font-weight:600}
+.status .pth{font-size:11px;color:var(--muted)}
+.status .act{padding:10px 18px;border-radius:9px;font-size:13px;font-weight:600}
+.status .act.light{background:#e6e6e6;color:#000}
+.status .act.light:hover:not(:disabled){background:#dadada}
+.status .act.dark{background:#000;color:#fff}
+.status .act.dark:hover:not(:disabled){background:#333}
+.notice{width:100%;display:flex;align-items:center;gap:10px;padding:10px 14px;border-radius:10px;font-size:12px;background:var(--panel)}
+.notice.err{background:#000;color:#fff}
+.notice span{flex:1;text-wrap:pretty}
+.np{width:100%;display:flex;flex-direction:column;gap:8px}
+.np .row{display:flex;align-items:center;gap:14px;padding:12px}
+.np .meta{flex:1;min-width:0;display:flex;flex-direction:column;gap:3px}
+.np .ttl{font-size:14px;font-weight:600}
+.np .art{font-size:12px;color:var(--muted)}
+.swap{display:flex;align-items:center;gap:6px;font-size:11px;font-weight:600}
+.swap .from{background:var(--panel);color:var(--faint);text-decoration:line-through}
+.swap .arrow{color:var(--faint)}
+.swap .to{background:#000;color:#fff}
+.np .empty{padding:20px 12px;font-size:12px;color:var(--faint);text-align:center}
+.stats{width:100%;display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}
+.stat{padding:12px 14px;border-radius:12px;background:var(--panel);display:flex;flex-direction:column;gap:4px}
+.stat b{font-size:22px;font-weight:700}
+.stat span{font-size:11px;color:var(--muted)}
+.hint{font-size:11px;color:var(--faint);text-align:center}
+
+/* история */
+#history{gap:18px}
+.head{display:flex;align-items:flex-end;justify-content:space-between;gap:12px}
+.head > div:first-child{display:flex;flex-direction:column;gap:4px}
+.hist{display:flex;flex-direction:column;overflow:hidden}
+.hrow{display:flex;align-items:center;gap:14px;padding:12px 16px}
+.hrow + .hrow{border-top:1px solid var(--line)}
+.hrow .meta{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px}
+.hrow .ttl{font-size:13px;font-weight:600}
+.hrow .art{font-size:11px;color:var(--muted)}
+.hrow .time{font-size:11px;color:var(--faint);white-space:nowrap}
+.hrow .badge{width:110px;text-align:center;padding:4px 0}
+.ok{background:#000;color:#fff}
+.bad{background:var(--panel);color:var(--muted)}
+.hist .empty{padding:36px 16px;font-size:12px;color:var(--faint);text-align:center}
+.right{display:flex;justify-content:flex-end}
+
+/* настройки */
+#settings{gap:22px}
+.group{display:flex;flex-direction:column;gap:8px}
+.pathrow{display:flex;gap:8px}
+.pathrow .path{flex:1;min-width:0;padding:11px 14px;border-radius:10px;background:var(--panel);font-size:12px;user-select:text}
+.pathrow .btn{border-radius:10px;padding:11px 16px}
+.opt{width:100%;display:flex;align-items:center;gap:14px;padding:13px 16px;text-align:left}
+.opt + .opt{border-top:1px solid var(--line)}
+.opt .txt{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px}
+.opt .txt b{font-size:13px;font-weight:600}
+.opt .txt span{font-size:11px;color:var(--muted);text-wrap:pretty}
+.sw{width:38px;height:22px;border-radius:11px;padding:3px;flex-shrink:0;display:flex;justify-content:flex-start;background:var(--knob-off);transition:background .15s}
+.sw::after{content:"";width:16px;height:16px;border-radius:50%;background:#fff;box-shadow:0 1px 2px rgba(0,0,0,.2)}
+.opt.on .sw{background:#000;justify-content:flex-end}
+.seg.wide button{flex:1;text-align:center;padding:8px 10px}
+.btns{display:flex;gap:8px;flex-wrap:wrap}
+
+/* инфо */
+#about{gap:22px}
+.about-text{font-size:13px;line-height:1.65;text-wrap:pretty}
+.kv{display:flex;justify-content:space-between;gap:12px;padding:12px 16px;font-size:12px}
+.kv + .kv{border-top:1px solid var(--line)}
+.kv span:first-child{color:var(--muted)}
+.kv span:last-child{font-weight:600;text-align:right}
+
+.toast{position:fixed;left:50%;bottom:20px;transform:translateX(-50%);padding:10px 16px;border-radius:9px;background:#000;color:#fff;font-size:12px;opacity:0;pointer-events:none;transition:opacity .2s}
+.toast.on{opacity:1}
+</style>
+</head>
+<body>
+<div class="app">
+  <nav class="side">
+    <div class="logo">fk<span>c</span></div>
+    <button class="nav" data-tab="home"><i>●</i><b>главная</b></button>
+    <button class="nav" data-tab="history"><i>≡</i><b>история</b></button>
+    <button class="nav" data-tab="settings"><i>◐</i><b>настройки</b></button>
+    <button class="nav" data-tab="about"><i>i</i><b>инфо</b></button>
+    <div class="grow"></div>
+    <div class="ver" id="ver"></div>
+  </nav>
+
+  <main class="main">
+    <section class="page col" id="home">
+      <div class="hero">
+        <div class="t">fkcensor</div>
+        <div class="s">возвращает оригинальные версии треков в яндекс музыке</div>
+      </div>
+
+      <div class="status">
+        <div class="dot" id="st-dot"></div>
+        <div class="txt">
+          <div class="ttl" id="st-title"></div>
+          <div class="pth ellipsis" id="st-path"></div>
+        </div>
+        <button class="act" id="st-btn"></button>
+      </div>
+
+      <div class="notice err" id="err" hidden><span id="err-text"></span><button data-act="dismissError">✕</button></div>
+      <div class="notice" id="unreach" hidden><span>хранилище замен недоступно — сейчас играют зацензуренные версии. если github заблокирован, включите vpn.</span></div>
+
+      <div class="np">
+        <div class="label">сейчас играет</div>
+        <div class="card" id="np"></div>
+      </div>
+
+      <div class="stats">
+        <div class="stat"><b id="s-today">0</b><span>заменено сегодня</span></div>
+        <div class="stat"><b id="s-total">0</b><span>заменено всего</span></div>
+        <div class="stat"><b id="s-failed">0</b><span>не загрузилось</span></div>
+      </div>
+
+      <div class="hint">программа работает в трее — окно можно закрыть</div>
+    </section>
+
+    <section class="page col" id="history">
+      <div class="head">
+        <div>
+          <div class="h1">история</div>
+          <div class="sub">треки, которые заменил fkcensor</div>
+        </div>
+        <div class="seg" id="filters">
+          <button data-filter="all">все</button>
+          <button data-filter="ok">заменённые</button>
+          <button data-filter="failed">ошибки</button>
+        </div>
+      </div>
+      <div class="card hist" id="hist"></div>
+      <div class="right"><button class="btn" data-act="clearHistory" style="font-weight:500;padding:9px 16px">очистить историю</button></div>
+    </section>
+
+    <section class="page col" id="settings">
+      <div style="display:flex;flex-direction:column;gap:4px">
+        <div class="h1">настройки</div>
+        <div class="sub">изменения применяются сразу</div>
+      </div>
+
+      <div class="group">
+        <div class="label">яндекс музыка</div>
+        <div class="pathrow">
+          <div class="path ellipsis" id="ym-path"></div>
+          <button class="btn" data-act="findYM">найти</button>
+          <button class="btn" data-act="browseYM">обзор</button>
+        </div>
+      </div>
+
+      <div class="group">
+        <div class="label">поведение</div>
+        <div class="box" id="opts"></div>
+      </div>
+
+      <div class="group">
+        <div class="label">если замена не загрузилась</div>
+        <div class="seg wide" id="fallback">
+          <button data-value="silent">тихо играть clean</button>
+          <button data-value="notify">играть clean и уведомить</button>
+        </div>
+      </div>
+
+      <div class="group">
+        <div class="label">патч</div>
+        <div class="btns">
+          <button class="btn" data-act="install" id="b-reinstall">переустановить</button>
+          <button class="btn" data-act="remove" id="b-remove">удалить патч</button>
+          <button class="btn" data-act="restartYM" id="b-restart">перезапустить яндекс музыку</button>
+        </div>
+      </div>
+    </section>
+
+    <section class="page col" id="about">
+      <div style="display:flex;flex-direction:column;gap:4px">
+        <div class="h1">о программе</div>
+        <div class="sub" id="about-sub"></div>
+      </div>
+      <div class="about-text">fkcensor живёт в трее и подменяет зацензуренные версии треков в десктопной яндекс музыке на оригинальные. список замен берётся из открытой базы fckcensordata на github. никаких аккаунтов и телеметрии.</div>
+      <div class="box">
+        <div class="kv"><span>последняя проверка обновлений</span><span id="a-check"></span></div>
+        <div class="kv"><span>версия яндекс музыки</span><span id="a-ym"></span></div>
+        <div class="kv"><span>треков в списке замен</span><span id="a-list"></span></div>
+      </div>
+      <div class="btns">
+        <button class="btn dark" id="b-update"></button>
+        <button class="btn" data-open="">исходный код</button>
+        <button class="btn" data-open="/issues">сообщить о проблеме</button>
+      </div>
+    </section>
+  </main>
+</div>
+<div class="toast" id="toast"></div>
+
+<script>
+'use strict';
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+
+let S = null;
+let filter = 'all';
+let tab = 'home';
+try { tab = localStorage.getItem('fkc-tab') || 'home'; } catch (_) {}
+
+const OPTS = [
+  ['autostart', 'запуск вместе с windows', 'fkcensor стартует свёрнутым в трей'],
+  ['notify', 'уведомления', 'показывать уведомление при замене трека'],
+  ['restartYM', 'перезапуск яндекс музыки', 'запускать клиент после установки или удаления патча'],
+  ['autoUpdate', 'проверка обновлений', 'проверять новую версию при запуске'],
+  ['hideToTray', 'сворачивать в трей', 'крестик прячет окно, а не закрывает программу'],
+];
+
+function act(name, arg) {
+  return window.fkcAction(name, arg === undefined ? null : arg).catch((e) => toast(String(e)));
+}
+
+function toast(msg) {
+  const t = $('toast');
+  t.textContent = msg;
+  t.classList.add('on');
+  clearTimeout(toast.timer);
+  toast.timer = setTimeout(() => t.classList.remove('on'), 3500);
+}
+window.fkcToast = toast;
+
+function setTab(t) {
+  tab = t;
+  try { localStorage.setItem('fkc-tab', t); } catch (_) {}
+  document.querySelectorAll('.nav').forEach((n) => n.classList.toggle('on', n.dataset.tab === t));
+  document.querySelectorAll('.page').forEach((p) => p.classList.toggle('on', p.id === t));
+}
+
+function fmtTime(ms) {
+  const d = new Date(ms), now = new Date();
+  const hm = d.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
+  const day = (x) => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime();
+  const diff = Math.round((day(now) - day(d)) / 864e5);
+  if (diff === 0) return hm;
+  if (diff === 1) return 'вчера, ' + hm;
+  return d.toLocaleDateString('ru-RU', { day: '2-digit', month: '2-digit' });
+}
+
+const num = (n) => Number(n || 0).toLocaleString('ru-RU');
+
+function cover(src, size) {
+  const st = `width:${size}px;height:${size}px;border-radius:${size > 40 ? 8 : 6}px`;
+  return src ? `<img class="cover" style="${st}" src="${esc(src)}" alt="" onerror="this.removeAttribute('src')">`
+             : `<div class="cover" style="${st}"></div>`;
+}
+
+// Главная кнопка и строка состояния
+function statusView(s) {
+  if (s.busy) return { dot: 'var(--off)', title: s.busy, btn: '…', dark: false, disabled: true };
+  switch (s.patch) {
+    case 'noym': return { dot: 'var(--warn)', title: 'яндекс музыка не найдена', btn: 'указать', dark: true, go: 'settings' };
+    case 'none': return { dot: 'var(--warn)', title: 'патч не установлен', btn: 'установить', dark: true };
+    case 'outdated': return { dot: 'var(--warn)', title: 'патч устарел', btn: 'обновить', dark: true };
+    case 'broken': return { dot: 'var(--warn)', title: 'патч повреждён — клиент не запустится', btn: 'восстановить', dark: true };
+  }
+  return s.enabled
+    ? { dot: 'var(--on)', title: 'цензура отключена', btn: 'пауза', dark: false }
+    : { dot: 'var(--off)', title: 'fkcensor на паузе', btn: 'включить', dark: true };
+}
+
+function render() {
+  const s = S;
+  if (!s) return;
+  $('ver').textContent = s.version;
+
+  // главная
+  const v = statusView(s);
+  $('st-dot').style.background = v.dot;
+  $('st-title').textContent = v.title;
+  let path = s.ymDir || 'папка не найдена — укажите её в настройках';
+  if (s.patch === 'ok' && !s.connected) path += ' · клиент не запущен';
+  $('st-path').textContent = path;
+  const b = $('st-btn');
+  b.textContent = v.btn;
+  b.className = 'act ' + (v.dark ? 'dark' : 'light');
+  b.disabled = !!v.disabled;
+  b.onclick = () => (v.go ? setTab(v.go) : act('toggle'));
+
+  $('err').hidden = !s.error;
+  $('err-text').textContent = s.error || '';
+  $('unreach').hidden = !(s.connected && !s.reachable);
+
+  const np = s.nowPlaying;
+  if (np) {
+    $('np').innerHTML = `<div class="row">${cover(np.artwork, 52)}
+      <div class="meta"><div class="ttl ellipsis">${esc(np.title)}</div><div class="art ellipsis">${esc(np.artist)}${np.playing ? '' : ' · пауза'}</div></div>
+      ${np.replaced ? '<div class="swap"><div class="badge from">clean</div><div class="arrow">→</div><div class="badge to">explicit</div></div>' : ''}</div>`;
+  } else {
+    $('np').innerHTML = `<div class="empty">${s.connected ? 'ничего не играет' : s.patch === 'ok' ? 'яндекс музыка не запущена' : 'появится после установки патча'}</div>`;
+  }
+  $('s-today').textContent = num(s.stats.today);
+  $('s-total').textContent = num(s.stats.total);
+  $('s-failed').textContent = num(s.stats.failed);
+
+  // история
+  document.querySelectorAll('#filters button').forEach((x) => x.classList.toggle('on', x.dataset.filter === filter));
+  const hist = (s.history || []).filter((h) => filter === 'all' || (filter === 'ok' ? !h.failed : h.failed));
+  $('hist').innerHTML = hist.length
+    ? hist.map((h) => `<div class="hrow">${cover(h.cover, 36)}
+        <div class="meta"><div class="ttl ellipsis">${esc(h.title)}</div><div class="art ellipsis">${esc(h.artist)}</div></div>
+        <div class="time">${fmtTime(h.time)}</div>
+        <div class="badge ${h.failed ? 'bad' : 'ok'}">${h.failed ? 'не загрузилось' : 'заменён'}</div></div>`).join('')
+    : `<div class="empty">${filter === 'all' ? 'пока пусто — включите трек из списка замен' : 'нет записей'}</div>`;
+
+  // настройки
+  $('ym-path').textContent = s.ymDir || 'не найдена';
+  $('opts').innerHTML = OPTS.map(([k, label, desc]) =>
+    `<button class="opt${s.settings[k] ? ' on' : ''}" data-opt="${k}"><div class="txt"><b>${label}</b><span>${desc}</span></div><div class="sw"></div></button>`).join('');
+  document.querySelectorAll('#fallback button').forEach((x) => x.classList.toggle('on', x.dataset.value === s.settings.fallback));
+  const busy = !!s.busy, noym = s.patch === 'noym';
+  $('b-reinstall').disabled = busy || noym;
+  $('b-reinstall').textContent = s.patch === 'ok' ? 'переустановить' : 'установить';
+  $('b-remove').disabled = busy || noym || s.patch === 'none';
+  $('b-restart').disabled = busy || noym;
+
+  // инфо
+  $('about-sub').textContent = `fkcensor ${s.version} · go ${s.goVersion} · windows ${s.arch === 'amd64' ? 'x64' : s.arch}`;
+  const u = s.update;
+  $('a-check').textContent = u.checking ? 'проверяем…' : u.checked ? fmtTime(u.checked) + (u.message ? ' · ' + u.message : '') : 'не проверялось';
+  const patchText = { ok: 'патч установлен', outdated: 'патч устарел', broken: 'патч повреждён', none: 'патч не установлен', noym: '' }[s.patch];
+  $('a-ym').textContent = s.ymVersion ? `${s.ymVersion} · ${patchText}` : 'не найдена';
+  $('a-list').textContent = s.connected && s.listCount ? num(s.listCount) : '—';
+  const ub = $('b-update');
+  ub.disabled = u.checking;
+  ub.textContent = u.newer ? `скачать ${u.latest}` : u.checking ? 'проверяем…' : 'проверить обновления';
+  ub.onclick = () => (u.newer ? act('open', u.url) : act('checkUpdate'));
+}
+
+window.fkcPush = (state) => { S = state; render(); };
+
+document.addEventListener('click', (e) => {
+  const t = e.target.closest('button');
+  if (!t || t.disabled) return;
+  if (t.dataset.tab) setTab(t.dataset.tab);
+  else if (t.dataset.act) act(t.dataset.act);
+  else if (t.dataset.filter) { filter = t.dataset.filter; render(); }
+  else if (t.dataset.opt) act('setting', { key: t.dataset.opt, value: !S.settings[t.dataset.opt] });
+  else if (t.dataset.value) act('setting', { key: 'fallback', value: t.dataset.value });
+  else if (t.dataset.open !== undefined && S) act('open', S.repoUrl + t.dataset.open);
+});
+
+setTab(['home', 'history', 'settings', 'about'].includes(tab) ? tab : 'home');
+window.fkcState().then(window.fkcPush);
+</script>
+</body>
+</html>
