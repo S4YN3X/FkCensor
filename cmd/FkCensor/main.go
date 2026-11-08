@@ -17,7 +17,7 @@ import (
 	"github.com/S4YN3X/FkCensor/internal/winutil"
 )
 
-const version = "v2.0.0"
+const version = "v2.1.0"
 
 func main() {
 	// --tray: запуск из автозагрузки, без окна

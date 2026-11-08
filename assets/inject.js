@@ -21,8 +21,13 @@
     let lastRecheck = 0;
     let pushedActive = null;
 
-    // Лог главного процесса и сообщений [FkCensor] из окна: %LOCALAPPDATA%\FkCensor\ym.log
-    const LOG_PATH = require('path').join(process.env.LOCALAPPDATA || '', 'FkCensor', 'ym.log');
+    // Папка данных FkCensor: %LOCALAPPDATA%\FkCensor в Windows, ~/Library/Application Support/FkCensor в macOS
+    const DATA_DIR = process.platform === 'win32'
+        ? require('path').join(process.env.LOCALAPPDATA || '', 'FkCensor')
+        : require('path').join(require('os').homedir(), 'Library', 'Application Support', 'FkCensor');
+
+    // Лог главного процесса и сообщений [FkCensor] из окна
+    const LOG_PATH = require('path').join(DATA_DIR, 'ym.log');
     function log(...args) {
         const text = args.map((a) => (typeof a === 'string' ? a : (a instanceof Error ? a.message : JSON.stringify(a)))).join(' ');
         console.log('[FkCensor] ' + text);
@@ -221,7 +226,8 @@
 
     function buildDataScript() {
         return `window.__fkCensorReplacements = ${JSON.stringify(replacements)}; window.__fkCensorMeta = ${JSON.stringify(meta)};` +
-            ` window.__fkCensorEnabled = ${enabledByApp}; window.__fkCensorActive = ${isActive()};`;
+            ` window.__fkCensorEnabled = ${enabledByApp}; window.__fkCensorActive = ${isActive()};` +
+            ' window.__fkcBadgesRefresh && window.__fkcBadgesRefresh();';
     }
 
     function buildRendererScript() {
@@ -232,7 +238,10 @@
 
     // Читаем список при каждом вызове: синхронизация обновляет только window.__fkCensorReplacements
     function getReplacementUrl(trackId) {
-        if (!trackId || window.__fkCensorActive !== true) return null;
+        if (!trackId) return null;
+        const local = window.__fkcLocalTracks && window.__fkcLocalTracks[String(trackId)];
+        if (local && local.url && window.__fkCensorEnabled === true) return local.url;
+        if (window.__fkCensorActive !== true) return null;
         const entry = (window.__fkCensorReplacements || {})[String(trackId)];
         return entry ? entry.url : null;
     }
@@ -318,6 +327,10 @@
         const m = getMeta();
         const raw = m.tracks[id];
         const s = raw ? withoutMeta(raw) : {};
+        // Своя подмена пользователя поверх подмены из базы
+        const local = window.__fkCensorEnabled === true ? localTracks[id] : null;
+        if (local && local.title) s.title = local.title;
+        if (local && local.durationMs) s.durationMs = local.durationMs;
         const unblock = !!getReplacementUrl(id);
         if (isEmpty(s) && !unblock) {
             (t.artists || []).forEach(applyArtist);
@@ -484,6 +497,610 @@
         console.log('[FkCensor] перехват ответов API включён');
     }
 
+    // ---- Значок FkCensor рядом с названием подменённого трека, альбома, исполнителя ----
+    const SVG_NS = 'http://www.w3.org/2000/svg';
+    const XLINK_NS = 'http://www.w3.org/1999/xlink';
+    const BADGE_ATTR = 'data-fkc-badge';
+    const BADGE_ICON = '/icons/sprite.svg#edit_xxs';
+
+    function isTrackSpoofed(id) {
+        if (window.__fkCensorEnabled !== true || !id) return false;
+        return !!getReplacementUrl(id) || !!getMeta().tracks[id] || !!localTracks[id];
+    }
+
+    function trackIdFromTitle(title) {
+        const a = title.querySelector('a[data-test-id="TRACK_TITLE"], a[href*="trackId="]');
+        if (!a) return null;
+        try { return new URL(a.getAttribute('href'), location.href).searchParams.get('trackId'); }
+        catch (_) { return null; }
+    }
+
+    // Разметка как у родной метки 18+: минифицированные классы берём у неё же,
+    // потому что они меняются от версии к версии клиента
+    function makeBadge(label) {
+        const native = document.querySelector('svg[data-test-id="EXPLICIT_MARK_ICON"]:not([data-fkc-icon])');
+        const wrap = document.createElement('span');
+        wrap.setAttribute(BADGE_ATTR, '');
+        const svg = document.createElementNS(SVG_NS, 'svg');
+        svg.setAttribute('data-fkc-icon', '');
+        svg.setAttribute('focusable', 'false');
+        svg.setAttribute('aria-label', label);
+        svg.style.width = 'var(--ym-icon-size-xxxs)';
+        svg.style.height = 'var(--ym-icon-size-xxxs)';
+        if (native) {
+            wrap.className = (native.parentElement && native.parentElement.className) || '';
+            svg.setAttribute('class', native.getAttribute('class') || '');
+        } else {
+            wrap.style.cssText = 'display:inline-flex;align-items:center;margin-left:6px;flex-shrink:0;opacity:.7';
+        }
+        const use = document.createElementNS(SVG_NS, 'use');
+        use.setAttributeNS(XLINK_NS, 'xlink:href', BADGE_ICON);
+        use.setAttribute('href', BADGE_ICON);
+        svg.appendChild(use);
+        wrap.appendChild(svg);
+        return wrap;
+    }
+
+    // Подсказка как у родных меток клиента (TooltipWithTitle): те же классы, а значения стилей
+    // продублированы на случай, если классы поменяются в новой версии клиента
+    let tooltipEl = null;
+    let tooltipAnchor = null;
+
+    function hideTooltip() {
+        if (tooltipEl) tooltipEl.remove();
+        tooltipEl = null;
+        tooltipAnchor = null;
+    }
+
+    function showTooltip(anchor, text) {
+        hideTooltip();
+        const portal = document.createElement('div');
+        portal.setAttribute('data-floating-ui-portal', '');
+        portal.setAttribute(BADGE_ATTR, '');
+        const root = document.createElement('div');
+        root.className = 'QhR4J536RmNHBB5bZYwF TooltipWithTitle_root__7jLY3';
+        root.setAttribute('role', 'tooltip');
+        root.style.cssText = 'position:absolute;left:0;top:0;z-index:700;max-width:230px;padding:4px 8px;' +
+            'border-radius:6px;background:rgb(41,41,41);pointer-events:none;visibility:hidden';
+        const inner = document.createElement('div');
+        inner.className = '_MWOVuZRvUQdXKTMcOPx Ai2iRN9elHpk_u5splD6 _3_Mxw7Si7j2g4kWjlpR Fqg1VWCJUfasVVxqICeO';
+        const box = document.createElement('div');
+        box.className = 'TooltipWithTitle_text__ElBtq';
+        const span = document.createElement('span');
+        span.className = '_MWOVuZRvUQdXKTMcOPx Ai2iRN9elHpk_u5splD6 ZYV27jeWd30QDXu4GhaH TooltipWithTitle_description__HsGcR';
+        span.style.cssText = 'font-size:13px;line-height:18px;font-weight:400;color:rgba(255,255,255,.5)';
+        span.textContent = text;
+        box.appendChild(span);
+        inner.appendChild(box);
+        root.appendChild(inner);
+        portal.appendChild(root);
+        document.body.appendChild(portal);
+        tooltipEl = portal;
+        tooltipAnchor = anchor;
+
+        // Под иконкой, по её левому краю, не вылезая за окно
+        const r = anchor.getBoundingClientRect();
+        const w = root.offsetWidth;
+        const h = root.offsetHeight;
+        let x = r.left - 4;
+        let y = r.bottom + 4;
+        if (x + w > innerWidth - 8) x = innerWidth - 8 - w;
+        if (y + h > innerHeight - 8) y = r.top - 4 - h;
+        root.style.transform = 'translate(' + Math.round(Math.max(8, x)) + 'px,' + Math.round(y) + 'px)';
+        root.style.visibility = 'visible';
+    }
+
+    // Наведение ловим на уровне документа: клиент перерисовывает строку при наведении,
+    // и обработчик на самом значке мог бы потеряться вместе со старым элементом
+    document.addEventListener('mouseover', (e) => {
+        const icon = e.target && e.target.closest ? e.target.closest('[data-fkc-icon]') : null;
+        if (icon && icon !== tooltipAnchor) showTooltip(icon, icon.getAttribute('aria-label') || '');
+        else if (!icon && tooltipEl) hideTooltip();
+    }, true);
+    addEventListener('scroll', hideTooltip, true);
+
+    // Значок аддона FckCensor (PulseSync) уже стоит — второй не нужен
+    function hasAddonBadge(el) {
+        const svg = el.querySelector('[data-fckcensor-badge] svg');
+        return !!svg && svg.getClientRects().length > 0;
+    }
+
+    function updateTrackTitle(title) {
+        let badge = title.querySelector(':scope > [' + BADGE_ATTR + ']');
+        if (!isTrackSpoofed(trackIdFromTitle(title)) || hasAddonBadge(title)) {
+            if (badge) badge.remove();
+            return;
+        }
+        if (!badge) badge = makeBadge('Трек был подменён FkCensor');
+        // После названия и родных меток, но перед кнопкой меню в плеере
+        const children = [...title.children].filter((c) => c !== badge);
+        const options = children.slice(1).find((c) => c.tagName === 'DIV');
+        if (options) { if (badge.nextElementSibling !== options) title.insertBefore(badge, options); }
+        else if (title.lastElementChild !== badge) title.appendChild(badge);
+    }
+
+    function updateHeaderTitle(title, spoofed, label) {
+        let badge = title.querySelector(':scope > [' + BADGE_ATTR + ']');
+        if (!spoofed || hasAddonBadge(title)) {
+            if (badge) badge.remove();
+            return;
+        }
+        if (badge) return;
+        title.style.display = 'flex';
+        title.style.alignItems = 'center';
+        title.appendChild(makeBadge(label));
+    }
+
+    function refreshBadges() {
+        document.querySelectorAll('[class*="Meta_titleContainer__"]').forEach(updateTrackTitle);
+
+        const params = new URLSearchParams(location.search);
+        const m = getMeta();
+        const enabled = window.__fkCensorEnabled === true;
+        if (location.pathname.startsWith('/album')) {
+            const albumId = params.get('albumId');
+            document.querySelectorAll('[class*="CommonAlbumPage_header__"] [class*="PageHeaderTitle_stickyTitle__"]')
+                .forEach((t) => updateHeaderTitle(t, enabled && !!m.albums[albumId], 'Альбом был подменён FkCensor'));
+        }
+        if (location.pathname.startsWith('/artist')) {
+            const artistId = params.get('artistId');
+            const spoofed = enabled && (!!m.artists[artistId] || insertionsFor(artistId, 'tracks').length + insertionsFor(artistId, 'albums').length > 0);
+            document.querySelectorAll('[class*="ArtistPage_header__"] [class*="PageHeaderTitle_stickyTitle__"]')
+                .forEach((t) => updateHeaderTitle(t, spoofed, 'Исполнитель был подменён FkCensor'));
+        }
+    }
+
+    // Обновляем не чаще раза в 300 мс: клиент перерисовывает DOM постоянно (прогресс, анимации)
+    let badgeTimer = null;
+    function scheduleBadges() {
+        if (badgeTimer) return;
+        badgeTimer = setTimeout(() => {
+            badgeTimer = null;
+            try { refreshBadges(); } catch (e) { console.error('[FkCensor] значки:', e && e.message); }
+        }, 300);
+    }
+    window.__fkcBadgesRefresh = scheduleBadges;
+
+    (function startBadges() {
+        if (!document.body) return setTimeout(startBadges, 200);
+        new MutationObserver((mutations) => {
+            // Свои значки не перезапускают обход
+            // Пункт «Подменить трек» нужен сразу, пока меню открыто
+            if (mutations.some((mu) => mu.addedNodes.length)) {
+                try { injectTrackMenus(); } catch (e) { console.error('[FkCensor] меню:', e && e.message); }
+            }
+            if (mutations.every((mu) => [...mu.addedNodes, ...mu.removedNodes].every((n) => n.nodeType === 1 && n.hasAttribute && n.hasAttribute(BADGE_ATTR)) && mu.type === 'childList')) return;
+            scheduleBadges();
+        }).observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['href'] });
+        scheduleBadges();
+    })();
+
+    // ---- Своя подмена трека: пункт в меню, окно подмены, хранение файлов в IndexedDB клиента ----
+    const localTracks = window.__fkcLocalTracks = window.__fkcLocalTracks || {};
+    const LOCAL_DB = 'FkCensorLocal';
+    const LOCAL_STORE = 'tracks';
+
+    function idb() {
+        return new Promise((resolve, reject) => {
+            const req = indexedDB.open(LOCAL_DB, 1);
+            req.onupgradeneeded = () => req.result.createObjectStore(LOCAL_STORE, { keyPath: 'id' });
+            req.onsuccess = () => resolve(req.result);
+            req.onerror = () => reject(req.error);
+        });
+    }
+
+    async function idbRun(mode, fn) {
+        const db = await idb();
+        return new Promise((resolve, reject) => {
+            const tx = db.transaction(LOCAL_STORE, mode);
+            const req = fn(tx.objectStore(LOCAL_STORE));
+            tx.oncomplete = () => resolve(req && req.result);
+            tx.onerror = () => reject(tx.error);
+        });
+    }
+
+    function rememberLocal(rec) {
+        const old = localTracks[rec.id];
+        if (old && old.url) URL.revokeObjectURL(old.url);
+        localTracks[rec.id] = {
+            title: rec.title || '',
+            durationMs: rec.durationMs || 0,
+            codec: rec.codec || 'mp3',
+            fileName: rec.fileName || '',
+            url: rec.file ? URL.createObjectURL(rec.file) : null,
+        };
+    }
+
+    async function loadLocalTracks() {
+        try {
+            const all = await idbRun('readonly', (st) => st.getAll());
+            for (const rec of all || []) rememberLocal(rec);
+            if ((all || []).length) console.log('[FkCensor] своих подмен:', all.length);
+            scheduleBadges();
+        } catch (e) { console.error('[FkCensor] своя подмена (загрузка):', e && e.message); }
+    }
+
+    async function saveLocalTrack(rec) {
+        await idbRun('readwrite', (st) => st.put(rec));
+        rememberLocal(rec);
+        scheduleBadges();
+    }
+
+    async function removeLocalTrack(id) {
+        await idbRun('readwrite', (st) => st.delete(id));
+        const old = localTracks[id];
+        if (old && old.url) URL.revokeObjectURL(old.url);
+        delete localTracks[id];
+        scheduleBadges();
+    }
+
+    function codecFor(trackId, url) {
+        const local = localTracks[String(trackId)];
+        return local && local.url === url ? local.codec : 'mp3';
+    }
+
+    function codecOfFile(file) {
+        const n = (file.name || '').toLowerCase();
+        const t = (file.type || '').toLowerCase();
+        if (n.endsWith('.flac') || t.includes('flac')) return 'flac';
+        if (n.endsWith('.m4a') || n.endsWith('.mp4') || t.includes('mp4')) return 'aac-mp4';
+        if (n.endsWith('.aac') || t.includes('aac')) return 'aac';
+        return 'mp3';
+    }
+
+    function audioDuration(file) {
+        return new Promise((resolve) => {
+            const url = URL.createObjectURL(file);
+            const a = new Audio();
+            const done = (ms) => { URL.revokeObjectURL(url); resolve(ms); };
+            a.addEventListener('loadedmetadata', () => done(isFinite(a.duration) ? Math.round(a.duration * 1000) : 0));
+            a.addEventListener('error', () => done(-1));
+            setTimeout(() => done(0), 8000);
+            a.src = url;
+        });
+    }
+
+    const fmtTime = (ms) => {
+        const sec = Math.round(ms / 1000);
+        return Math.floor(sec / 60) + ':' + String(sec % 60).padStart(2, '0');
+    };
+
+    // Трек, к которому относится открытое меню: кнопка «⋯» связана с меню через aria-labelledby
+    function trackIdForMenu(menu) {
+        const holder = menu.closest('[aria-labelledby]');
+        const btn = holder && document.getElementById(holder.getAttribute('aria-labelledby'));
+        if (!btn) return null;
+        let scope = btn.closest('[class*="CommonTrack_root__"]') || btn.closest('[class*="CommonLayout_playerBar__"]') ||
+            btn.closest('[class*="FullscreenPlayer"]');
+        if (!scope) scope = btn.parentElement && btn.parentElement.parentElement && btn.parentElement.parentElement.parentElement;
+        const link = scope && scope.querySelector('a[href*="trackId="]');
+        if (!link) return null;
+        try { return new URL(link.getAttribute('href'), location.href).searchParams.get('trackId'); }
+        catch (_) { return null; }
+    }
+
+    function injectTrackMenus() {
+        document.querySelectorAll('[data-test-id="TRACK_CONTEXT_MENU"]').forEach((menu) => {
+            if (menu.querySelector('[data-fkc-menuitem]')) return;
+            const items = [...menu.querySelectorAll('[role="menuitem"]')];
+            // У аддона FckCensor (PulseSync) такой пункт уже есть — второй не нужен
+            if (!items.length || items.some((i) => i.textContent.trim() === 'Подменить трек')) return;
+            const trackId = trackIdForMenu(menu);
+            if (!trackId) return;
+
+            const item = items[0].cloneNode(true);
+            item.removeAttribute('data-test-id');
+            item.setAttribute('data-fkc-menuitem', '');
+            const label = item.querySelector('span') || item;
+            const icon = label.querySelector('svg');
+            while (label.firstChild) label.removeChild(label.firstChild);
+            if (icon) {
+                const use = icon.querySelector('use');
+                if (use) { use.setAttributeNS(XLINK_NS, 'xlink:href', BADGE_ICON); use.setAttribute('href', BADGE_ICON); }
+                label.appendChild(icon);
+            }
+            label.appendChild(document.createTextNode('Подменить трек'));
+            item.addEventListener('click', (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', bubbles: true }));
+                openSpoofDialog(trackId);
+            }, true);
+            const before = items[2] || null;
+            if (before) before.parentElement.insertBefore(item, before);
+            else items[items.length - 1].parentElement.appendChild(item);
+        });
+    }
+
+    const DIALOG_CSS = [
+        '.fkc-overlay{position:fixed;inset:0;z-index:2147483000;display:flex;align-items:center;justify-content:center;',
+        'background:var(--ym-background-color-primary-enabled-overlay,rgba(0,0,0,.5));font-family:inherit}',
+        '.fkc-dialog{width:min(620px,calc(100vw - 48px));max-height:calc(100vh - 48px);overflow:auto;box-sizing:border-box;',
+        'background:var(--ym-background-color-primary-enabled-popover,#1a1a1a);border-radius:24px;padding:20px 24px 24px;',
+        'box-shadow:0 1px 20px rgba(0,0,0,.48);display:flex;flex-direction:column;gap:22px;',
+        'color:var(--ym-controls-color-secondary-text-enabled_variant,#fff)}',
+        '.fkc-head{display:flex;align-items:center;justify-content:space-between;gap:12px}',
+        '.fkc-h{margin:0;font-family:"YS Music","YS Text",sans-serif;font-size:24px;font-weight:800;letter-spacing:-.3px;',
+        'color:var(--ym-controls-color-primary-text-enabled_variant,#e6e6e6);opacity:.8}',
+        '.fkc-x{width:36px;height:36px;border:0;border-radius:50%;cursor:pointer;display:flex;align-items:center;justify-content:center;',
+        'background:var(--ym-controls-color-secondary-default-enabled,rgba(255,255,255,.08));color:var(--ym-controls-color-secondary-on_default-enabled,#e6e6e6)}',
+        '.fkc-x:hover{background:var(--ym-controls-color-secondary-default-hovered,rgba(255,255,255,.12))}',
+        '.fkc-x svg{width:18px;height:18px}',
+        '.fkc-top{display:flex;gap:20px;align-items:center}',
+        '.fkc-cover{width:150px;height:150px;border-radius:14px;object-fit:cover;flex-shrink:0;background:rgba(255,255,255,.08)}',
+        '.fkc-field{flex:1;min-width:0;display:flex;flex-direction:column;gap:10px}',
+        '.fkc-label{font-size:15px;font-weight:600;color:var(--ym-controls-color-secondary-text-enabled,rgba(255,255,255,.5))}',
+        '.fkc-input{height:46px;border:0;border-radius:12px;padding:0 14px;font:inherit;font-size:15px;outline:none;box-sizing:border-box;width:100%;',
+        'background:var(--ym-surface-color-primary-enabled-list,rgba(255,255,255,.08));color:var(--ym-controls-color-secondary-text-enabled_variant,#fff)}',
+        '.fkc-input:focus{box-shadow:0 0 0 2px var(--ym-controls-color-primary-default-focused_stroke,rgba(255,255,0,.5))}',
+        '.fkc-artists{display:flex;flex-wrap:wrap;gap:8px;padding:8px;border-radius:12px;min-height:30px;',
+        'background:var(--ym-surface-color-primary-enabled-list,rgba(255,255,255,.08))}',
+        '.fkc-chip{display:flex;align-items:center;gap:8px;padding:4px 12px 4px 4px;border-radius:10px;font-size:14px;font-weight:500;',
+        'background:var(--ym-controls-color-secondary-default-hovered,rgba(255,255,255,.12));color:var(--ym-controls-color-secondary-on_default-enabled,#e6e6e6)}',
+        '.fkc-chip img,.fkc-chip i{width:26px;height:26px;border-radius:50%;object-fit:cover;background:rgba(255,255,255,.12)}',
+        '.fkc-audio{display:flex;align-items:center;gap:20px}',
+        '.fkc-status{flex:1;text-align:center;font-size:14px;color:var(--ym-controls-color-secondary-text-enabled,rgba(255,255,255,.5))}',
+        '.fkc-status b{color:var(--ym-controls-color-secondary-text-enabled_variant,#fff);font-weight:500}',
+        '.fkc-btn{height:46px;border:0;border-radius:100px;padding:0 22px;font:inherit;font-size:14px;font-weight:600;cursor:pointer;white-space:nowrap}',
+        '.fkc-primary{background:var(--ym-controls-color-primary-default-enabled,#ff0);color:var(--ym-controls-color-primary-on_default-enabled,#000)}',
+        '.fkc-primary:hover{background:var(--ym-controls-color-primary-default-hovered,#dada0b)}',
+        '.fkc-wide{width:280px}',
+        '.fkc-secondary{background:var(--ym-controls-color-secondary-default-enabled,rgba(255,255,255,.08));color:var(--ym-controls-color-secondary-on_default-enabled,#e6e6e6)}',
+        '.fkc-secondary:hover{background:var(--ym-controls-color-secondary-default-hovered,rgba(255,255,255,.12))}',
+        '.fkc-btn:disabled{cursor:default;background:var(--ym-controls-color-primary-default-disabled,#333);color:var(--ym-controls-color-primary-on_default-disabled,#4d4d4d)}',
+        '.fkc-foot{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-top:6px}',
+        '.fkc-foot-right{display:flex;gap:12px}',
+        '.fkc-toast{position:fixed;left:50%;bottom:120px;transform:translateX(-50%);z-index:2147483001;padding:12px 18px;border-radius:14px;',
+        'font-size:14px;background:var(--ym-background-color-primary-enabled-popover,#1a1a1a);color:var(--ym-controls-color-secondary-text-enabled_variant,#fff);',
+        'box-shadow:0 1px 20px rgba(0,0,0,.48);max-width:480px;text-align:center}',
+    ].join('');
+
+    function ensureDialogCss() {
+        if (document.getElementById('fkc-dialog-css')) return;
+        const st = document.createElement('style');
+        st.id = 'fkc-dialog-css';
+        st.textContent = DIALOG_CSS;
+        document.head.appendChild(st);
+    }
+
+    function el(tag, cls, text) {
+        const e = document.createElement(tag);
+        if (cls) e.className = cls;
+        if (text != null) e.textContent = text;
+        return e;
+    }
+
+    function spriteIcon(name) {
+        const svg = document.createElementNS(SVG_NS, 'svg');
+        const use = document.createElementNS(SVG_NS, 'use');
+        use.setAttributeNS(XLINK_NS, 'xlink:href', '/icons/sprite.svg#' + name);
+        use.setAttribute('href', '/icons/sprite.svg#' + name);
+        svg.appendChild(use);
+        return svg;
+    }
+
+    function showToast(text) {
+        ensureDialogCss();
+        const t = el('div', 'fkc-toast', text);
+        document.body.appendChild(t);
+        setTimeout(() => t.remove(), 5000);
+    }
+
+    const coverUrl = (uri, size) => uri ? (uri.includes('://') ? uri : 'https://' + uri).replace('%%', size) : '';
+
+    async function openSpoofDialog(trackId) {
+        ensureDialogCss();
+        const existing = document.querySelector('.fkc-overlay');
+        if (existing) existing.remove();
+
+        let track = null;
+        try { track = (await fetchTracks([trackId]))[0] || null; } catch (_) {}
+        const saved = localTracks[trackId] || null;
+        const shownTitle = (track && track.title) || '';
+        let pickedFile = null;
+        let removeAudio = false;
+
+        const overlay = el('div', 'fkc-overlay');
+        const dlg = el('div', 'fkc-dialog');
+        overlay.appendChild(dlg);
+
+        const head = el('div', 'fkc-head');
+        head.appendChild(el('h2', 'fkc-h', 'Подмена трека'));
+        const close = el('button', 'fkc-x');
+        close.setAttribute('aria-label', 'Закрыть');
+        close.appendChild(spriteIcon('close_xs'));
+        head.appendChild(close);
+        dlg.appendChild(head);
+
+        const top = el('div', 'fkc-top');
+        const cover = el('img', 'fkc-cover');
+        const coverUri = track && (track.coverUri || (track.albums && track.albums[0] && track.albums[0].coverUri));
+        if (coverUri) cover.src = coverUrl(coverUri, '400x400');
+        top.appendChild(cover);
+        const field = el('div', 'fkc-field');
+        field.appendChild(el('div', 'fkc-label', 'Название'));
+        const input = el('input', 'fkc-input');
+        input.value = shownTitle;
+        input.placeholder = 'Название трека';
+        field.appendChild(input);
+        top.appendChild(field);
+        dlg.appendChild(top);
+
+        const artistsField = el('div', 'fkc-field');
+        artistsField.appendChild(el('div', 'fkc-label', 'Исполнители'));
+        const artists = el('div', 'fkc-artists');
+        for (const a of (track && track.artists) || []) {
+            const chip = el('div', 'fkc-chip');
+            const avatar = a.cover && a.cover.uri ? el('img') : el('i');
+            if (a.cover && a.cover.uri) avatar.src = coverUrl(a.cover.uri, '50x50');
+            chip.appendChild(avatar);
+            chip.appendChild(document.createTextNode(a.name || ''));
+            artists.appendChild(chip);
+        }
+        artistsField.appendChild(artists);
+        dlg.appendChild(artistsField);
+
+        const audio = el('div', 'fkc-audio');
+        const pick = el('button', 'fkc-btn fkc-primary fkc-wide', 'Подменить аудио');
+        const status = el('div', 'fkc-status');
+        const fileInput = el('input');
+        fileInput.type = 'file';
+        fileInput.accept = 'audio/*,.mp3,.flac,.m4a,.aac,.ogg,.wav';
+        fileInput.style.display = 'none';
+        audio.appendChild(pick);
+        audio.appendChild(status);
+        audio.appendChild(fileInput);
+        dlg.appendChild(audio);
+
+        const foot = el('div', 'fkc-foot');
+        const report = el('button', 'fkc-btn fkc-primary', 'Сообщить о цензуре');
+        report.disabled = isReported(trackId) || hasAnySpoof(trackId);
+        const right = el('div', 'fkc-foot-right');
+        const del = el('button', 'fkc-btn fkc-secondary', 'Удалить подмену');
+        const apply = el('button', 'fkc-btn fkc-primary', 'Применить');
+        right.appendChild(del);
+        right.appendChild(apply);
+        foot.appendChild(report);
+        foot.appendChild(right);
+        dlg.appendChild(foot);
+
+        report.addEventListener('click', async () => {
+            report.disabled = true;
+            const ok = await reportCensor(trackId, false);
+            report.disabled = ok || isReported(trackId);
+        });
+
+        const hasRemote = !!((window.__fkCensorReplacements || {})[trackId]);
+        function renderStatus() {
+            status.textContent = '';
+            if (pickedFile) {
+                status.appendChild(document.createTextNode('Будет: '));
+                status.appendChild(el('b', null, pickedFile.name));
+            } else if (saved && saved.url && !removeAudio) {
+                status.appendChild(document.createTextNode('Свой файл: '));
+                status.appendChild(el('b', null, saved.fileName || 'аудио'));
+                if (saved.durationMs) status.appendChild(document.createTextNode(' · ' + fmtTime(saved.durationMs)));
+            } else if (hasRemote) {
+                status.textContent = 'Подменяется из базы FckCensorData.';
+            } else {
+                status.textContent = 'Аудио не подменяется.';
+            }
+            del.disabled = !saved;
+        }
+        renderStatus();
+
+        const closeDialog = () => { overlay.remove(); document.removeEventListener('keydown', onKey, true); };
+        const onKey = (e) => { if (e.key === 'Escape') { e.stopPropagation(); closeDialog(); } };
+        document.addEventListener('keydown', onKey, true);
+        close.addEventListener('click', closeDialog);
+        overlay.addEventListener('mousedown', (e) => { if (e.target === overlay) closeDialog(); });
+
+        pick.addEventListener('click', () => fileInput.click());
+        fileInput.addEventListener('change', () => {
+            if (fileInput.files && fileInput.files[0]) { pickedFile = fileInput.files[0]; removeAudio = false; renderStatus(); }
+        });
+
+        del.addEventListener('click', async () => {
+            try {
+                await removeLocalTrack(trackId);
+                closeDialog();
+                showToast('Подмена удалена. Если трек уже играл, включите его заново.');
+            } catch (e) { showToast('Не удалось удалить подмену: ' + (e && e.message)); }
+        });
+
+        apply.addEventListener('click', async () => {
+            apply.disabled = true;
+            try {
+                const rec = { id: trackId };
+                const title = input.value.trim();
+                if (title && title !== shownTitle) rec.title = title;
+                else if (saved && saved.title && title === shownTitle) rec.title = saved.title;
+                if (pickedFile) {
+                    const durationMs = await audioDuration(pickedFile);
+                    if (durationMs < 0) throw new Error('файл не похож на аудио');
+                    rec.file = pickedFile;
+                    rec.fileName = pickedFile.name;
+                    rec.codec = codecOfFile(pickedFile);
+                    if (durationMs) rec.durationMs = durationMs;
+                } else if (saved && saved.url) {
+                    const old = await idbRun('readonly', (st) => st.get(trackId));
+                    if (old && old.file) Object.assign(rec, { file: old.file, fileName: old.fileName, codec: old.codec, durationMs: old.durationMs });
+                }
+                if (!rec.title && !rec.file) { closeDialog(); return; }
+                await saveLocalTrack(rec);
+                if (!saved) reportCensor(trackId, true);
+                if (rec.title) {
+                    document.querySelectorAll('a[data-test-id="TRACK_TITLE"]').forEach((a) => {
+                        let id = null;
+                        try { id = new URL(a.getAttribute('href'), location.href).searchParams.get('trackId'); } catch (_) {}
+                        const span = a.querySelector('span');
+                        if (id === trackId && span) span.textContent = rec.title;
+                    });
+                }
+                closeDialog();
+                showToast(rec.file ? 'Подмена сохранена. Если трек уже играл, включите его заново.' : 'Название сохранено.');
+            } catch (e) {
+                apply.disabled = false;
+                showToast('Не удалось сохранить: ' + (e && e.message));
+            }
+        });
+
+        document.body.appendChild(overlay);
+        setTimeout(() => input.focus(), 0);
+    }
+
+    // ---- «Сообщить о цензуре»: как в аддоне FckCensor, в их очередь модерации (с разрешения автора) ----
+    // Публичный ключ Supabase хранится так же, как в аддоне: base64 с лишними символами по краям
+    const REPORT_URL = 'https://pzomqvgckpgkshxhpite.supabase.co/rest/v1/reported_tracks';
+    const REPORT_KEY = 'nkrikZXlKaGJHY2lPaUpJVXpJMU5pSXNJblI1Y0NJNklrcFhWQ0o5LmV5SnBjM01pT2lKemRYQmhZbUZ6WlNJc0luSmxaaUk2SW5CNmIyMXhkbWRqYTNCbmEzTm9lR2h3YVhSbElpd2ljbTlzWlNJNkltRnViMjRpTENKcFlYUWlPakUzTnpVd05UZ3pOREVzSW1WNGNDSTZNakE1TURZek5ETTBNWDAuZ2dDeE0tdmVyM2dEV1VCV3loU0JmeTNuN3JwZFc4anRseFJRVkNYa2hOZ3x5b3VyIG1vbSBpcyBmYXR0o6O55';
+    const REPORTED_STORAGE = 'fkc-reported';
+
+    function reportKey() {
+        return atob(REPORT_KEY.slice(5, REPORT_KEY.length - 5)).split('|')[0];
+    }
+
+    function reportedSet() {
+        try { return new Set(JSON.parse(localStorage.getItem(REPORTED_STORAGE) || '[]')); }
+        catch (_) { return new Set(); }
+    }
+
+    function isReported(id) { return reportedSet().has('track_' + id); }
+
+    function markReported(id) {
+        const set = reportedSet();
+        set.add('track_' + id);
+        try { localStorage.setItem(REPORTED_STORAGE, JSON.stringify([...set])); } catch (_) {}
+    }
+
+    // replaced=true — пользователь сам подставил свой файл; тогда сообщение уходит молча, как в аддоне
+    async function reportCensor(id, replaced) {
+        if (!isNum(String(id)) || isReported(id)) return false;
+        let ok = false;
+        try {
+            const key = reportKey();
+            const r = await fetch(REPORT_URL, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', apikey: key, Authorization: 'Bearer ' + key },
+                body: JSON.stringify({ track_id: Number(id), type: 'track', replaced: !!replaced }),
+            });
+            ok = r.ok;
+        } catch (e) { console.error('[FkCensor] сообщение о цензуре:', e && e.message); }
+        if (ok) markReported(id);
+        if (!replaced) {
+            showToast(ok ? 'Спасибо! В скором времени этот трек будет добавлен в список автоматически подменяемых.'
+                : 'Не удалось сообщить о цензуре.');
+        }
+        return ok;
+    }
+
+    // Как в аддоне: сообщать не о чем, если трек уже подменяется (из базы или своим файлом)
+    function hasAnySpoof(id) {
+        return !!(window.__fkCensorReplacements || {})[id] || !!getMeta().tracks[id] || !!localTracks[id];
+    }
+
+    window.__fkcLocal = { open: openSpoofDialog, menus: injectTrackMenus, all: () => localTracks, isReported };
+    loadLocalTracks();
+
     // Плеер получает источник звука через getFileInfo / getFileInfoBatch у ресурса file-info.
     // Ответ: { downloadInfo | fileInfo: { trackId, codec, transport, key, urls, url, ... } }
     // (в пакетном запросе — downloadInfos | fileInfos). Для треков из списка подставляем
@@ -495,7 +1112,7 @@
             trackId: String(trackId),
             realId: String(trackId),
             quality: di.quality || quality || 'nq',
-            codec: 'mp3',
+            codec: codecFor(trackId, url),
             bitrate: 320,
             transport: 'raw',
             gain: false,
@@ -640,7 +1257,7 @@
 
     function readIpcInfo() {
         try {
-            const p = require('path').join(process.env.LOCALAPPDATA || '', 'FkCensor', 'ipc.json');
+            const p = require('path').join(DATA_DIR, 'ipc.json');
             return JSON.parse(require('fs').readFileSync(p, 'utf8'));
         } catch(_) { return null; }
     }
@@ -698,7 +1315,8 @@
         const { webContents } = require('electron');
         webContents.getAllWebContents().forEach((wc) => {
             if (!wc.isDestroyed()) {
-                wc.executeJavaScript(`window.__fkCensorEnabled = ${enabledByApp}; window.__fkCensorActive = ${active};`).catch(() => {});
+                wc.executeJavaScript(`window.__fkCensorEnabled = ${enabledByApp}; window.__fkCensorActive = ${active};` +
+                    ' window.__fkcBadgesRefresh && window.__fkcBadgesRefresh();').catch(() => {});
             }
         });
     }
@@ -727,7 +1345,9 @@
 
         const report = [];
         for (const e of events) {
-            const ok = await checkUrl(e.url);
+            // Свой файл пользователя лежит в самом клиенте — проверять нечего
+            const local = String(e.url).startsWith('blob:');
+            const ok = local || await checkUrl(e.url);
             if (!ok) reachable = false;
             report.push({ type: ok ? 'replaced' : 'failed', trackId: e.trackId, cover: e.cover || '' });
         }

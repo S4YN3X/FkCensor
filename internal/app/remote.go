@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -11,7 +12,7 @@ import (
 	"github.com/S4YN3X/FkCensor/internal/winutil"
 )
 
-var httpClient = &http.Client{Timeout: 10 * time.Second}
+var httpClient = &http.Client{Timeout: 20 * time.Second}
 
 func getJSON(url string, v any) (int, error) {
 	req, _ := http.NewRequest("GET", url, nil)
@@ -100,14 +101,27 @@ func (a *App) checkUpdate(silent bool) {
 		TagName string `json:"tag_name"`
 		HTMLURL string `json:"html_url"`
 	}
-	code, err := getJSON("https://api.github.com/repos/S4YN3X/FkCensor/releases/latest", &rel)
+	// GitHub из России отвечает нестабильно: одна повторная попытка спасает большинство случаев
+	var code int
+	var err error
+	for attempt := 0; attempt < 2; attempt++ {
+		if code, err = getJSON("https://api.github.com/repos/S4YN3X/FkCensor/releases/latest", &rel); err == nil || code == http.StatusNotFound {
+			break
+		}
+		time.Sleep(2 * time.Second)
+	}
 
 	u := UpdateInfo{Checked: time.Now().UnixMilli()}
 	switch {
 	case code == http.StatusNotFound:
 		u.Message = "релизов пока нет"
 	case err != nil:
-		u.Message = "не удалось проверить: " + err.Error()
+		fmt.Fprintln(os.Stderr, "[FkCensor] проверка обновлений:", err)
+		if code != 0 {
+			u.Message = fmt.Sprintf("github ответил ошибкой %d — попробуйте позже", code)
+		} else {
+			u.Message = "github не отвечает — попробуйте позже или включите vpn"
+		}
 	case newerVersion(rel.TagName, a.Version):
 		u.Latest, u.Newer, u.URL = rel.TagName, true, rel.HTMLURL
 		u.Message = "доступна " + rel.TagName

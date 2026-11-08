@@ -20,7 +20,6 @@ const (
 type Settings struct {
 	Enabled    bool   `json:"enabled"`
 	Autostart  bool   `json:"autostart"`
-	Notify     bool   `json:"notify"`
 	RestartYM  bool   `json:"restartYM"`
 	AutoUpdate bool   `json:"autoUpdate"`
 	HideToTray bool   `json:"hideToTray"`
@@ -65,7 +64,6 @@ func Open() *Store {
 	s := &Store{path: filepath.Join(Dir(), "state.json")}
 	s.d.Settings = Settings{
 		Enabled:    true,
-		Notify:     false,
 		RestartYM:  true,
 		AutoUpdate: true,
 		HideToTray: true,

@@ -368,37 +368,13 @@ func Patch(asarPath, exePath, injectScript string) error {
 		// старый бэкап относится к другой версии и восстанавливать его нельзя.
 		return fmt.Errorf("backup: %w", err)
 	}
-	headerJSON, fileData, err := splitASAR(original)
+	patched, newHash, err := Build(original, injectScript)
 	if err != nil {
-		return fmt.Errorf("read backup: %w", err)
+		return err
 	}
-	if bytes.Contains(fileData, []byte(patchMarker)) {
-		return fmt.Errorf("в бэкапе тоже стоит патч — переустановите яндекс музыку")
-	}
+	origHash, _ := HeaderHash(original)
 
-	// Находим главный файл через package.json
-	mainFile := findMainFile(headerJSON, fileData)
-	fmt.Printf("[asarpatch] Patching: %s\n", mainFile)
-
-	origContent, err := findFileContent(headerJSON, fileData, mainFile)
-	if err != nil {
-		return fmt.Errorf("find %s: %w", mainFile, err)
-	}
-
-	// Inject ПОСЛЕ оригинала (import'ы должны быть в начале)
-	newContent := append(
-		append([]byte(nil), origContent...),
-		[]byte("\n"+injectScript+"\n")...,
-	)
-
-	newHeaderJSON, newFileData, err := patchFile(headerJSON, fileData, mainFile, newContent)
-	if err != nil {
-		return fmt.Errorf("patch file: %w", err)
-	}
-	newHash := hashHeader(newHeaderJSON)
-	origHash := hashHeader(headerJSON)
-
-	if err := writeFileRetry(asarPath, writeASAR(newHeaderJSON, newFileData)); err != nil {
+	if err := writeFileRetry(asarPath, patched); err != nil {
 		return fmt.Errorf("write asar: %w", err)
 	}
 	candidates := append([]string{hashHeader(curHeader), origHash}, knownHashes(asarPath)...)
@@ -409,8 +385,51 @@ func Patch(asarPath, exePath, injectScript string) error {
 
 	os.MkdirAll(filepath.Dir(hashCachePath), 0755)
 	os.WriteFile(hashCachePath, []byte(origHash), 0644)
-	fmt.Printf("[asarpatch] ASAR patch installed ✓ (main: %s)\n", mainFile)
+	fmt.Println("[asarpatch] ASAR patch installed ✓")
 	return nil
+}
+
+// Build собирает пропатченный asar из исходного (без патча) и возвращает его
+// вместе с контрольной суммой заголовка — той, что Electron сверяет при запуске.
+// Файлы не трогает: где хранить сумму (exe в Windows, Info.plist в macOS), решает вызывающий.
+func Build(original []byte, injectScript string) (patched []byte, headerHash string, err error) {
+	headerJSON, fileData, err := splitASAR(original)
+	if err != nil {
+		return nil, "", fmt.Errorf("read asar: %w", err)
+	}
+	if bytes.Contains(fileData, []byte(patchMarker)) {
+		return nil, "", fmt.Errorf("в исходном asar уже стоит патч — переустановите яндекс музыку")
+	}
+
+	// Находим главный файл через package.json
+	mainFile := findMainFile(headerJSON, fileData)
+	fmt.Printf("[asarpatch] Patching: %s\n", mainFile)
+
+	origContent, err := findFileContent(headerJSON, fileData, mainFile)
+	if err != nil {
+		return nil, "", fmt.Errorf("find %s: %w", mainFile, err)
+	}
+
+	// Inject ПОСЛЕ оригинала (import'ы должны быть в начале)
+	newContent := append(
+		append([]byte(nil), origContent...),
+		[]byte("\n"+injectScript+"\n")...,
+	)
+
+	newHeaderJSON, newFileData, err := patchFile(headerJSON, fileData, mainFile, newContent)
+	if err != nil {
+		return nil, "", fmt.Errorf("patch file: %w", err)
+	}
+	return writeASAR(newHeaderJSON, newFileData), hashHeader(newHeaderJSON), nil
+}
+
+// HeaderHash — контрольная сумма заголовка asar.
+func HeaderHash(asar []byte) (string, error) {
+	headerJSON, _, err := splitASAR(asar)
+	if err != nil {
+		return "", err
+	}
+	return hashHeader(headerJSON), nil
 }
 
 // Unpatch восстанавливает asar из бэкапа и возвращает исходную сумму в exe.

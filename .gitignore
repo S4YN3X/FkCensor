@@ -5,3 +5,4 @@ FkCensor-*
 *.tar.gz
 *.zip
 *.exe~
+tools/

@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/jchv/go-webview2"
 
@@ -34,7 +35,8 @@ type Window struct {
 	wv       webview2.WebView
 	hwnd     uintptr
 	starting bool
-	pending  bool
+	// pendingSince — когда ушло ещё не обработанное обновление окна (ноль — ничего не в пути)
+	pendingSince time.Time
 }
 
 func New(a *app.App) *Window { return &Window{app: a} }
@@ -104,7 +106,7 @@ func (w *Window) run() {
 
 	unsubscribe()
 	w.mu.Lock()
-	w.wv, w.hwnd, w.pending = nil, 0, false
+	w.wv, w.hwnd, w.pendingSince = nil, 0, time.Time{}
 	w.mu.Unlock()
 	if w.OnClosed != nil {
 		w.OnClosed()
@@ -115,14 +117,16 @@ func (w *Window) run() {
 func (w *Window) schedulePush() {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	if w.wv == nil || w.pending {
+	// Dispatch идёт через PostThreadMessage, а такие сообщения Windows теряет, пока окно
+	// в модальном цикле (перетаскивание, сворачивание). Поэтому «в пути» не дольше 2 секунд.
+	if w.wv == nil || (!w.pendingSince.IsZero() && time.Since(w.pendingSince) < 2*time.Second) {
 		return
 	}
-	w.pending = true
+	w.pendingSince = time.Now()
 	wv := w.wv
 	wv.Dispatch(func() {
 		w.mu.Lock()
-		w.pending = false
+		w.pendingSince = time.Time{}
 		w.mu.Unlock()
 		raw, err := json.Marshal(w.app.Snapshot())
 		if err == nil {

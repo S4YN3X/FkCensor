@@ -266,7 +266,6 @@ try { tab = localStorage.getItem('fkc-tab') || 'home'; } catch (_) {}
 
 const OPTS = [
   ['autostart', 'запуск вместе с windows', 'fkcensor стартует свёрнутым в трей'],
-  ['notify', 'уведомления', 'показывать уведомление при замене трека'],
   ['restartYM', 'перезапуск яндекс музыки', 'запускать клиент после установки или удаления патча'],
   ['autoUpdate', 'проверка обновлений', 'проверять новую версию при запуске'],
   ['hideToTray', 'сворачивать в трей', 'крестик прячет окно, а не закрывает программу'],
@@ -407,6 +406,8 @@ document.addEventListener('click', (e) => {
 
 setTab(['home', 'history', 'settings', 'about'].includes(tab) ? tab : 'home');
 window.fkcState().then(window.fkcPush);
+// Подстраховка: если обновление от программы потерялось, окно само запросит состояние
+setInterval(() => window.fkcState().then(window.fkcPush).catch(() => {}), 2000);
 </script>
 </body>
 </html>

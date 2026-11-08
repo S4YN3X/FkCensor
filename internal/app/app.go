@@ -275,8 +275,6 @@ func (a *App) SetSetting(key string, value any) error {
 			return fmt.Errorf("автозапуск: %w", err)
 		}
 		a.store.UpdateSettings(func(s *store.Settings) { s.Autostart = b })
-	case "notify":
-		a.store.UpdateSettings(func(s *store.Settings) { s.Notify = b })
 	case "restartYM":
 		a.store.UpdateSettings(func(s *store.Settings) { s.RestartYM = b })
 	case "autoUpdate":
@@ -368,11 +366,7 @@ func (a *App) handleEvent(e ipc.Event) {
 			a.changed()
 		}
 
-		s := a.store.Settings()
-		switch {
-		case !failed && s.Notify:
-			winutil.Notify("трек заменён", strings.TrimSuffix(entry.Title+" — "+entry.Artist, " — "))
-		case failed && s.Fallback == store.FallbackNotify:
+		if failed && a.store.Settings().Fallback == store.FallbackNotify {
 			a.mu.Lock()
 			due := time.Since(a.lastFail) > failNotifyEvery
 			if due {
