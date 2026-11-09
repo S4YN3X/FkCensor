@@ -1,0 +1,25 @@
+# Бесплатный проект Supabase засыпает после 7 дней без запросов.
+# Раз в 3 дня обращаемся к базе, чтобы очередь сообщений о цензуре не останавливалась.
+# Нужны секреты репозитория: SUPABASE_URL и SUPABASE_ANON_KEY
+# (Settings → Secrets and variables → Actions).
+name: supabase keepalive
+
+on:
+  schedule:
+    - cron: "0 6 */3 * *"
+  workflow_dispatch:
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping Supabase
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+        run: |
+          curl -fsS -X POST "$SUPABASE_URL/rest/v1/rpc/ping" \
+            -H "apikey: $SUPABASE_ANON_KEY" \
+            -H "Authorization: Bearer $SUPABASE_ANON_KEY" \
+            -H "Content-Type: application/json" \
+            -d '{}'

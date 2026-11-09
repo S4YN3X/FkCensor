@@ -6,3 +6,4 @@ FkCensor-*
 *.zip
 *.exe~
 tools/
+supabase/

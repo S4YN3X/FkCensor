@@ -966,11 +966,15 @@
 
         report.addEventListener('click', async () => {
             report.disabled = true;
-            const ok = await reportCensor(trackId, false);
+            const ok = await reportCensor(trackId, false, reportInfo());
             report.disabled = ok || isReported(trackId);
         });
 
         const hasRemote = !!((window.__fkCensorReplacements || {})[trackId]);
+        const reportInfo = () => ({
+            title: shownTitle,
+            artists: ((track && track.artists) || []).map((a) => a.name).filter(Boolean).join(', '),
+        });
         function renderStatus() {
             status.textContent = '';
             if (pickedFile) {
@@ -1028,7 +1032,7 @@
                 }
                 if (!rec.title && !rec.file) { closeDialog(); return; }
                 await saveLocalTrack(rec);
-                if (!saved) reportCensor(trackId, true);
+                if (!saved) reportCensor(trackId, true, reportInfo());
                 if (rec.title) {
                     document.querySelectorAll('a[data-test-id="TRACK_TITLE"]').forEach((a) => {
                         let id = null;
@@ -1055,6 +1059,31 @@
     const REPORT_KEY = 'nkrikZXlKaGJHY2lPaUpJVXpJMU5pSXNJblI1Y0NJNklrcFhWQ0o5LmV5SnBjM01pT2lKemRYQmhZbUZ6WlNJc0luSmxaaUk2SW5CNmIyMXhkbWRqYTNCbmEzTm9lR2h3YVhSbElpd2ljbTlzWlNJNkltRnViMjRpTENKcFlYUWlPakUzTnpVd05UZ3pOREVzSW1WNGNDSTZNakE1TURZek5ETTBNWDAuZ2dDeE0tdmVyM2dEV1VCV3loU0JmeTNuN3JwZFc4anRseFJRVkNYa2hOZ3x5b3VyIG1vbSBpcyBmYXR0o6O55';
     const REPORTED_STORAGE = 'fkc-reported';
 
+    // Своя очередь модерации FkCensor (Supabase, схема в supabase/schema.sql).
+    // Пока адрес пустой, сообщения уходят только в очередь FckCensor.
+    const OWN_REPORT_URL = 'https://mrqlfhiqjinueibsxnof.supabase.co';
+    const OWN_REPORT_KEY = 'sb_publishable_6yhyZv93vTD26vz-F4VQSQ_pN12qEMn'; // публичный: только добавление записей
+    const CLIENT_ID_STORAGE = 'fkc-client-id';
+
+    // Случайный id установки: нужен своей очереди только против повторов и спама
+    function clientId() {
+        try {
+            let id = localStorage.getItem(CLIENT_ID_STORAGE);
+            if (!id) { id = crypto.randomUUID(); localStorage.setItem(CLIENT_ID_STORAGE, id); }
+            return id;
+        } catch (_) { return crypto.randomUUID(); }
+    }
+
+    async function postReport(url, key, body) {
+        const r = await fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', apikey: key, Authorization: 'Bearer ' + key },
+            body: JSON.stringify(body),
+        });
+        // 409 — с этой установки о треке уже сообщали
+        return r.ok || r.status === 409;
+    }
+
     function reportKey() {
         return atob(REPORT_KEY.slice(5, REPORT_KEY.length - 5)).split('|')[0];
     }
@@ -1072,19 +1101,22 @@
         try { localStorage.setItem(REPORTED_STORAGE, JSON.stringify([...set])); } catch (_) {}
     }
 
-    // replaced=true — пользователь сам подставил свой файл; тогда сообщение уходит молча, как в аддоне
-    async function reportCensor(id, replaced) {
+    // replaced=true — пользователь сам подставил свой файл; тогда сообщение уходит молча, как в аддоне.
+    // Сообщение уходит в очередь FckCensor и в свою, если она настроена; успех — если дошло хоть куда-то.
+    async function reportCensor(id, replaced, info) {
         if (!isNum(String(id)) || isReported(id)) return false;
-        let ok = false;
-        try {
-            const key = reportKey();
-            const r = await fetch(REPORT_URL, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json', apikey: key, Authorization: 'Bearer ' + key },
-                body: JSON.stringify({ track_id: Number(id), type: 'track', replaced: !!replaced }),
-            });
-            ok = r.ok;
-        } catch (e) { console.error('[FkCensor] сообщение о цензуре:', e && e.message); }
+        const body = { track_id: Number(id), type: 'track', replaced: !!replaced };
+        const jobs = [postReport(REPORT_URL, reportKey(), body)];
+        if (OWN_REPORT_URL && OWN_REPORT_KEY) {
+            jobs.push(postReport(OWN_REPORT_URL.replace(/[/]+$/, '') + '/rest/v1/reports', OWN_REPORT_KEY, Object.assign({}, body, {
+                title: ((info && info.title) || '').slice(0, 300) || null,
+                artists: ((info && info.artists) || '').slice(0, 300) || null,
+                client_id: clientId(),
+            })));
+        }
+        const results = await Promise.allSettled(jobs);
+        results.forEach((r) => { if (r.status === 'rejected') console.error('[FkCensor] сообщение о цензуре:', r.reason && r.reason.message); });
+        const ok = results.some((r) => r.status === 'fulfilled' && r.value);
         if (ok) markReported(id);
         if (!replaced) {
             showToast(ok ? 'Спасибо! В скором времени этот трек будет добавлен в список автоматически подменяемых.'
