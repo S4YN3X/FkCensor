@@ -3,15 +3,38 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>FkCensor</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+<title>F_ckCensor</title>
+<!--fonts-->
+<script>
+// Тема до загрузки остального: окно не мигает светлым при тёмной теме
+try { document.documentElement.dataset.theme = localStorage.getItem('fkc-theme-applied') || 'light'; } catch (_) {}
+// Масштаб интерфейса из настроек (ставит программа до загрузки страницы)
+if (window.fkcZoom && window.fkcZoom !== 1) document.documentElement.style.zoom = window.fkcZoom;
+// Окно открыто маленькой заставкой (флаг ставит программа до загрузки страницы)
+if (window.fkcSplash) document.documentElement.classList.add('splash-win');
+</script>
 <style>
 :root{
   --bg:#fff; --panel:#f4f4f4; --line:#e6e6e6; --hover:#e6e6e6;
   --text:#000; --muted:#6b6b6b; --faint:#8a8a8a;
   --on:#1fb05a; --off:#b5b5b5; --warn:#e0a100;
-  --knob-off:#cfcfcf;
+  --knob-off:#cfcfcf; --knob:#fff; --knob-on:#fff;
+  --accent:#000; --on-accent:#fff; --accent-hover:#333;
+  --seg-on:#fff; --seg-on-text:#000; --shadow:rgba(0,0,0,.12);
+  --cover-a:#f0f0f0; --cover-b:#e6e6e6;
+  --act-light:#e6e6e6; --act-light-hover:#dadada;
+  color-scheme:light;
+}
+:root[data-theme="dark"]{
+  --bg:#121212; --panel:#1d1d1d; --line:#2c2c2c; --hover:#2a2a2a;
+  --text:#f2f2f2; --muted:#9a9a9a; --faint:#7a7a7a;
+  --off:#5a5a5a;
+  --knob-off:#3a3a3a; --knob:#cfcfcf; --knob-on:#121212;
+  --accent:#f2f2f2; --on-accent:#000; --accent-hover:#d6d6d6;
+  --seg-on:#2e2e2e; --seg-on-text:#f2f2f2; --shadow:rgba(0,0,0,.5);
+  --cover-a:#1f1f1f; --cover-b:#262626;
+  --act-light:#2a2a2a; --act-light-hover:#333;
+  color-scheme:dark;
 }
 *{box-sizing:border-box}
 [hidden]{display:none!important}
@@ -20,19 +43,40 @@ body{margin:0;background:var(--bg);color:var(--text);font-family:'IBM Plex Mono'
 button{font:inherit;color:inherit;border:0;background:none;padding:0;cursor:pointer}
 button:disabled{cursor:default;opacity:.5}
 
-.app{height:100%;display:flex}
-.side{width:92px;background:var(--panel);border-right:1px solid var(--line);display:flex;flex-direction:column;align-items:center;padding:14px 0;gap:6px;flex-shrink:0}
-.logo{font-size:15px;font-weight:700;letter-spacing:-.5px;margin-bottom:12px}
-.logo span{color:var(--faint)}
-.nav{width:72px;padding:10px 0 8px;border-radius:11px;display:flex;flex-direction:column;align-items:center;gap:6px}
+.app{height:calc(100% - var(--tb));display:flex}
+
+/* своя шапка окна вместо системной: логотип, название вкладки и кнопки окна */
+:root{--tb:40px}
+.titlebar{position:relative;height:var(--tb);display:flex;align-items:stretch;background:var(--panel);border-bottom:1px solid var(--line)}
+/* логотип стоит ровно над колонкой меню */
+.tb-drag{flex:1;min-width:0;display:flex;align-items:center;gap:12px;padding-left:17px}
+.tb-logo{width:22px;height:22px;border-radius:6px;background:var(--accent);color:var(--on-accent);display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:700;letter-spacing:-.5px}
+.tb-title{font-size:13px;font-weight:600}
+.tb-btns{display:flex}
+.tb-btn{width:46px;display:flex;align-items:center;justify-content:center;color:var(--text);transition:background-color .12s,color .12s}
+.tb-btn:hover{background:var(--hover)}
+.tb-btn.close:hover{background:#e81123;color:#fff}
+.tb-btn svg{width:10px;height:10px;fill:none;stroke:currentColor;stroke-width:1}
+/* растягивание за верхний край: тонкая полоса сверху, по углам — по диагонали */
+.tb-edge{position:absolute;left:0;right:0;top:0;height:4px;cursor:n-resize}
+.tb-edge i{position:absolute;top:0;width:10px;height:6px}
+.tb-edge i:first-child{left:0;cursor:nw-resize}
+.tb-edge i:last-child{right:0;cursor:ne-resize}
+.maxed .tb-edge{display:none}
+.maxed .tb-max-icon,.tb-restore-icon{display:none}
+.maxed .tb-restore-icon{display:inline}
+/* меню — только значки: названия вкладок и так видны в шапке */
+.side{width:56px;background:var(--panel);border-right:1px solid var(--line);display:flex;flex-direction:column;align-items:center;padding:10px 0 14px;gap:6px;flex-shrink:0}
+.nav{width:40px;height:40px;border-radius:10px;display:flex;align-items:center;justify-content:center}
 .nav:hover{background:var(--hover)}
-.nav.on{background:#000;color:#fff}
+.nav.on{background:var(--accent);color:var(--on-accent)}
 .nav i{font-style:normal;font-size:16px;line-height:18px;height:18px}
-.nav b{font-size:11px;font-weight:500}
+.nav svg{width:17px;height:17px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
 .side .grow{flex:1}
 .side .ver{font-size:10px;color:var(--muted)}
 
-.main{flex:1;min-width:0;overflow:auto;padding:36px 44px}
+/* место под полосу прокрутки занято всегда — иначе при длинном списке страница сужается и контент прыгает */
+.main{flex:1;min-width:0;overflow:auto;scrollbar-gutter:stable;padding:36px 44px}
 .page{display:none}
 .page.on{display:flex}
 
@@ -46,12 +90,13 @@ button:disabled{cursor:default;opacity:.5}
 .ellipsis{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .btn{padding:10px 16px;border-radius:9px;font-size:12px;font-weight:600;background:var(--panel)}
 .btn:hover:not(:disabled){background:var(--hover)}
-.btn.dark{background:#000;color:#fff}
-.btn.dark:hover:not(:disabled){background:#333}
-.cover{border-radius:8px;flex-shrink:0;background:repeating-linear-gradient(45deg,#f0f0f0 0 6px,#e6e6e6 6px 12px);object-fit:cover;display:block}
+.btn.dark{background:var(--accent);color:var(--on-accent)}
+.btn.dark:hover:not(:disabled){background:var(--accent-hover)}
+.cover{border-radius:8px;flex-shrink:0;background:repeating-linear-gradient(45deg,var(--cover-a) 0 6px,var(--cover-b) 6px 12px);object-fit:cover;display:block}
 .seg{display:flex;gap:6px;padding:4px;border-radius:10px;background:var(--panel)}
 .seg button{padding:6px 12px;border-radius:7px;font-size:12px;font-weight:500;color:var(--muted)}
-.seg button.on{background:#fff;color:#000;box-shadow:0 1px 2px rgba(0,0,0,.12)}
+.seg button.on{background:var(--seg-on);color:var(--seg-on-text);box-shadow:0 1px 2px var(--shadow)}
+.seg.wide button{flex:1;text-align:center;padding:8px 10px}
 .badge{padding:4px 8px;border-radius:6px;font-size:11px;font-weight:600}
 
 /* главная */
@@ -65,12 +110,12 @@ button:disabled{cursor:default;opacity:.5}
 .status .ttl{font-size:14px;font-weight:600}
 .status .pth{font-size:11px;color:var(--muted)}
 .status .act{padding:10px 18px;border-radius:9px;font-size:13px;font-weight:600}
-.status .act.light{background:#e6e6e6;color:#000}
-.status .act.light:hover:not(:disabled){background:#dadada}
-.status .act.dark{background:#000;color:#fff}
-.status .act.dark:hover:not(:disabled){background:#333}
+.status .act.light{background:var(--act-light);color:var(--text)}
+.status .act.light:hover:not(:disabled){background:var(--act-light-hover)}
+.status .act.dark{background:var(--accent);color:var(--on-accent)}
+.status .act.dark:hover:not(:disabled){background:var(--accent-hover)}
 .notice{width:100%;display:flex;align-items:center;gap:10px;padding:10px 14px;border-radius:10px;font-size:12px;background:var(--panel)}
-.notice.err{background:#000;color:#fff}
+.notice.err{background:var(--accent);color:var(--on-accent)}
 .notice span{flex:1;text-wrap:pretty}
 .np{width:100%;display:flex;flex-direction:column;gap:8px}
 .np .row{display:flex;align-items:center;gap:14px;padding:12px}
@@ -80,7 +125,7 @@ button:disabled{cursor:default;opacity:.5}
 .swap{display:flex;align-items:center;gap:6px;font-size:11px;font-weight:600}
 .swap .from{background:var(--panel);color:var(--faint);text-decoration:line-through}
 .swap .arrow{color:var(--faint)}
-.swap .to{background:#000;color:#fff}
+.swap .to{background:var(--accent);color:var(--on-accent)}
 .np .empty{padding:20px 12px;font-size:12px;color:var(--faint);text-align:center}
 .stats{width:100%;display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}
 .stat{padding:12px 14px;border-radius:12px;background:var(--panel);display:flex;flex-direction:column;gap:4px}
@@ -100,7 +145,7 @@ button:disabled{cursor:default;opacity:.5}
 .hrow .art{font-size:11px;color:var(--muted)}
 .hrow .time{font-size:11px;color:var(--faint);white-space:nowrap}
 .hrow .badge{width:110px;text-align:center;padding:4px 0}
-.ok{background:#000;color:#fff}
+.ok{background:var(--accent);color:var(--on-accent)}
 .bad{background:var(--panel);color:var(--muted)}
 .hist .empty{padding:36px 16px;font-size:12px;color:var(--faint);text-align:center}
 .right{display:flex;justify-content:flex-end}
@@ -117,9 +162,9 @@ button:disabled{cursor:default;opacity:.5}
 .opt .txt b{font-size:13px;font-weight:600}
 .opt .txt span{font-size:11px;color:var(--muted);text-wrap:pretty}
 .sw{width:38px;height:22px;border-radius:11px;padding:3px;flex-shrink:0;display:flex;justify-content:flex-start;background:var(--knob-off);transition:background .15s}
-.sw::after{content:"";width:16px;height:16px;border-radius:50%;background:#fff;box-shadow:0 1px 2px rgba(0,0,0,.2)}
-.opt.on .sw{background:#000;justify-content:flex-end}
-.seg.wide button{flex:1;text-align:center;padding:8px 10px}
+.sw::after{content:"";width:16px;height:16px;border-radius:50%;background:var(--knob);box-shadow:0 1px 2px var(--shadow)}
+.opt.on .sw{background:var(--accent)}
+.opt.on .sw::after{background:var(--knob-on)}
 .btns{display:flex;gap:8px;flex-wrap:wrap}
 
 /* инфо */
@@ -130,18 +175,129 @@ button:disabled{cursor:default;opacity:.5}
 .kv span:first-child{color:var(--muted)}
 .kv span:last-child{font-weight:600;text-align:right}
 
-.toast{position:fixed;left:50%;bottom:20px;transform:translateX(-50%);padding:10px 16px;border-radius:9px;background:#000;color:#fff;font-size:12px;opacity:0;pointer-events:none;transition:opacity .2s}
-.toast.on{opacity:1}
+.toast{position:fixed;left:50%;bottom:20px;transform:translate(-50%,10px);padding:10px 16px;border-radius:9px;background:var(--accent);color:var(--on-accent);font-size:12px;opacity:0;pointer-events:none;transition:opacity .2s,transform .3s var(--ease)}
+.toast.on{opacity:1;transform:translate(-50%,0)}
+
+/* ---------- анимации ---------- */
+:root{--ease:cubic-bezier(.2,.8,.2,1)}
+@keyframes rise{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:none}}
+@keyframes drop{from{opacity:0;transform:translateY(-8px)}to{opacity:1;transform:none}}
+@keyframes fadein{from{opacity:0}to{opacity:1}}
+@keyframes pulse{0%{box-shadow:0 0 0 0 color-mix(in srgb,var(--on) 50%,transparent)}70%,100%{box-shadow:0 0 0 7px transparent}}
+@keyframes eq{0%,100%{transform:scaleY(.3)}50%{transform:scaleY(1)}}
+
+/* Переход между вкладками: блоки страницы поднимаются по очереди.
+   Анимация срабатывает, когда страница перестаёт быть display:none, — то есть только при смене вкладки */
+.page.on > *{animation:rise .42s var(--ease) both}
+.page.on > :nth-child(2){animation-delay:.04s}
+.page.on > :nth-child(3){animation-delay:.08s}
+.page.on > :nth-child(4){animation-delay:.12s}
+.page.on > :nth-child(5){animation-delay:.16s}
+.page.on > :nth-child(6){animation-delay:.2s}
+.page.on > :nth-child(n+7){animation-delay:.24s}
+/* до первого состояния от программы страница пустая — показываем её, когда данные пришли */
+.boot .page.on > *{animation:none;opacity:0}
+
+/* активный пункт меню — плашка, которая переезжает к выбранной вкладке */
+.side{position:relative}
+.pill{position:absolute;left:8px;top:0;width:40px;height:0;border-radius:10px;background:var(--accent);transition:transform .38s var(--ease),height .38s var(--ease)}
+.pill.instant{transition:none}
+.nav{position:relative;transition:background-color .15s,color .25s,transform .12s}
+.nav.on,.nav.on:hover{background:transparent}
+
+/* история: при смене фильтра строки появляются по очереди, новая запись выезжает сверху */
+.hist.stagger .hrow{animation:rise .5s var(--ease) both;animation-delay:calc(min(var(--i),10) * 60ms)}
+.hrow.new{animation:drop .45s var(--ease) both}
+
+/* сейчас играет: новый трек проявляется, рядом с подписью — эквалайзер, пока трек играет */
+.np .row.swapin{animation:fadein .4s ease both}
+.np .row.swapin .cover{animation:rise .4s var(--ease) both}
+.eq{display:inline-flex;align-items:flex-end;gap:2px;height:9px;margin-left:7px;vertical-align:-1px;opacity:0;transition:opacity .3s}
+.eq.on{opacity:1}
+.eq i{width:2px;height:100%;border-radius:1px;background:var(--muted);transform-origin:bottom;transform:scaleY(.3)}
+.eq.on i{animation:eq .9s ease-in-out infinite}
+.eq i:nth-child(2){animation-delay:-.3s;animation-duration:.8s}
+.eq i:nth-child(3){animation-delay:-.6s;animation-duration:1s}
+
+/* статус: точка мягко пульсирует, пока замена работает */
+.dot{transition:background-color .3s}
+.dot.live{animation:pulse 2.2s ease-out infinite}
+
+/* переключатели и кнопки */
+.sw{display:block}
+.sw::after{display:block;transition:transform .25s var(--ease),background-color .15s}
+.opt.on .sw::after{transform:translateX(16px)}
+.btn,.status .act,.seg button{transition:background-color .15s,color .15s,box-shadow .15s,transform .12s}
+.btn:active:not(:disabled),.status .act:active:not(:disabled),.seg button:active,.nav:active{transform:scale(.96)}
+
+/* плавная смена темы */
+.theming,.theming *{transition:background-color .35s,color .35s,box-shadow .35s,border-color .35s!important}
+
+/* Заставка: окно открывается маленьким, без рамки — логотип и «загружаем» со сменяющимися словами
+   (по мотивам uiverse.io/kennyotsu/fresh-lizard-20). Потом программа делает окно обычным. */
+.splash{display:none;position:fixed;inset:0;z-index:50;flex-direction:column;align-items:center;justify-content:center;gap:26px;background:var(--bg)}
+.splash-win .splash{display:flex}
+/* пока окно маленькое, страница под заставкой не прокручивается */
+.splash-win:has(#splash:not(.gone)) body,.splash-win:has(#splash:not(.gone)) .main{overflow:hidden}
+.splash.gone{display:none!important}
+.splash .mark{width:76px;height:76px;border-radius:20px;background:var(--accent);color:var(--on-accent);display:flex;align-items:center;justify-content:center;font-size:32px;font-weight:700;letter-spacing:-2px;animation:mark .6s var(--ease) both}
+@keyframes mark{from{opacity:0;transform:scale(.8)}to{opacity:1;transform:none}}
+.loader{display:flex;height:26px;font-size:14px;font-weight:600;color:var(--faint);animation:fadein .5s .15s both}
+.loader p{margin:0;line-height:26px}
+.words{overflow:hidden;position:relative}
+/* верх и низ слов мягко растворяются в фоне */
+.words::after{content:"";position:absolute;inset:0;z-index:1;background:linear-gradient(var(--bg) 10%,transparent 30%,transparent 70%,var(--bg) 90%)}
+.word{display:block;height:100%;line-height:26px;padding-left:8px;color:var(--text);animation:words 3s infinite}
+/* обновление при запуске: строка состояния, полоска скачивания и кнопка пропуска внизу заставки,
+   чтобы логотип и надпись не сдвигались */
+.upd{position:absolute;left:0;right:0;bottom:20px;display:flex;flex-direction:column;align-items:center;gap:9px}
+.upd-msg{font-size:11px;color:var(--muted)}
+.upd-bar{width:150px;height:3px;border-radius:2px;background:var(--line);overflow:hidden}
+.upd-bar i{display:block;height:100%;width:0;background:var(--text);transition:width .25s ease}
+.upd-skip{padding:7px 12px;font-size:11px;font-weight:600;border-radius:8px;animation:fadein .3s both}
+@keyframes words{
+  10%{transform:translateY(-102%)} 25%{transform:translateY(-100%)}
+  35%{transform:translateY(-202%)} 50%{transform:translateY(-200%)}
+  60%{transform:translateY(-302%)} 75%{transform:translateY(-300%)}
+  85%{transform:translateY(-402%)} 100%{transform:translateY(-400%)}
+}
+
+/* Спойлер как в Telegram: буква скрыта под облаком мерцающих точек, нажатие открывает её */
+.spoiler{position:relative;display:inline-block;color:transparent;cursor:pointer;user-select:none;transition:color .35s ease}
+.spoiler canvas{position:absolute;left:-3px;top:0;width:calc(100% + 6px);height:100%;pointer-events:none;transition:opacity .35s ease}
+.spoiler.open{color:inherit;cursor:default}
+.spoiler.open canvas{opacity:0}
+
+/* анимации выключены в настройках или в Windows */
+.no-anim *,.no-anim *::before,.no-anim *::after{animation:none!important;transition:none!important}
+@media (prefers-reduced-motion:reduce){
+  *,*::before,*::after{animation:none!important;transition:none!important}
+}
 </style>
 </head>
-<body>
+<body class="boot">
+<header class="titlebar" id="titlebar">
+  <div class="tb-drag">
+    <div class="tb-logo">fk</div>
+    <div class="tb-title" id="tb-title"></div>
+  </div>
+  <div class="tb-btns">
+    <button class="tb-btn" data-win="minimize" title="свернуть"><svg viewBox="0 0 10 10"><path d="M0 5.5h10"/></svg></button>
+    <button class="tb-btn" data-win="maximize" id="tb-max" title="развернуть">
+      <svg class="tb-max-icon" viewBox="0 0 10 10"><rect x=".5" y=".5" width="9" height="9"/></svg>
+      <svg class="tb-restore-icon" viewBox="0 0 10 10"><rect x=".5" y="2.5" width="7" height="7"/><path d="M2.5 2.5v-2h7v7h-2"/></svg>
+    </button>
+    <button class="tb-btn close" data-win="close" title="закрыть"><svg viewBox="0 0 10 10"><path d="M0 0l10 10M10 0L0 10"/></svg></button>
+  </div>
+  <div class="tb-edge" id="tb-edge"><i></i><i></i></div>
+</header>
 <div class="app">
   <nav class="side">
-    <div class="logo">fk<span>c</span></div>
-    <button class="nav" data-tab="home"><i>●</i><b>главная</b></button>
-    <button class="nav" data-tab="history"><i>≡</i><b>история</b></button>
-    <button class="nav" data-tab="settings"><i>◐</i><b>настройки</b></button>
-    <button class="nav" data-tab="about"><i>i</i><b>инфо</b></button>
+    <div class="pill instant" id="pill"></div>
+    <button class="nav" data-tab="home" title="главная"><i>●</i></button>
+    <button class="nav" data-tab="history" title="история"><svg viewBox="0 0 24 24"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M12 7v5l4 2"/></svg></button>
+    <button class="nav" data-tab="settings" title="настройки"><svg viewBox="0 0 24 24"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg></button>
+    <button class="nav" data-tab="about" title="инфо"><i>i</i></button>
     <div class="grow"></div>
     <div class="ver" id="ver"></div>
   </nav>
@@ -149,7 +305,7 @@ button:disabled{cursor:default;opacity:.5}
   <main class="main">
     <section class="page col" id="home">
       <div class="hero">
-        <div class="t">fkcensor</div>
+        <div class="t">f<span class="spoiler">u</span>ckcensor</div>
         <div class="s">возвращает оригинальные версии треков в яндекс музыке</div>
       </div>
 
@@ -166,7 +322,7 @@ button:disabled{cursor:default;opacity:.5}
       <div class="notice" id="unreach" hidden><span>хранилище замен недоступно — сейчас играют зацензуренные версии. если github заблокирован, включите vpn.</span></div>
 
       <div class="np">
-        <div class="label">сейчас играет</div>
+        <div class="label">сейчас играет<span class="eq" id="eq"><i></i><i></i><i></i></span></div>
         <div class="card" id="np"></div>
       </div>
 
@@ -183,7 +339,7 @@ button:disabled{cursor:default;opacity:.5}
       <div class="head">
         <div>
           <div class="h1">история</div>
-          <div class="sub">треки, которые заменил fkcensor</div>
+          <div class="sub">треки, которые играли в яндекс музыке</div>
         </div>
         <div class="seg" id="filters">
           <button data-filter="all">все</button>
@@ -202,6 +358,26 @@ button:disabled{cursor:default;opacity:.5}
       </div>
 
       <div class="group">
+        <div class="label">тема</div>
+        <div class="seg wide" id="theme">
+          <button data-theme-value="system">как в системе</button>
+          <button data-theme-value="light">светлая</button>
+          <button data-theme-value="dark">тёмная</button>
+        </div>
+      </div>
+
+      <div class="group">
+        <div class="label">масштаб интерфейса</div>
+        <div class="seg wide" id="scale">
+          <button data-scale="100">100%</button>
+          <button data-scale="125">125%</button>
+          <button data-scale="150">150%</button>
+          <button data-scale="175">175%</button>
+          <button data-scale="200">200%</button>
+        </div>
+      </div>
+
+      <div class="group">
         <div class="label">яндекс музыка</div>
         <div class="pathrow">
           <div class="path ellipsis" id="ym-path"></div>
@@ -213,14 +389,6 @@ button:disabled{cursor:default;opacity:.5}
       <div class="group">
         <div class="label">поведение</div>
         <div class="box" id="opts"></div>
-      </div>
-
-      <div class="group">
-        <div class="label">если замена не загрузилась</div>
-        <div class="seg wide" id="fallback">
-          <button data-value="silent">тихо играть clean</button>
-          <button data-value="notify">играть clean и уведомить</button>
-        </div>
       </div>
 
       <div class="group">
@@ -238,7 +406,7 @@ button:disabled{cursor:default;opacity:.5}
         <div class="h1">о программе</div>
         <div class="sub" id="about-sub"></div>
       </div>
-      <div class="about-text">fkcensor живёт в трее и подменяет зацензуренные версии треков в десктопной яндекс музыке на оригинальные. список замен берётся из открытой базы fckcensordata на github. никаких аккаунтов и телеметрии.</div>
+      <div class="about-text">f<span class="spoiler">u</span>ckcensor работает в трее и подменяет зацензуренные версии треков в яндекс музыке на оригинальные. никаких аккаунтов и телеметрии.</div>
       <div class="box">
         <div class="kv"><span>последняя проверка обновлений</span><span id="a-check"></span></div>
         <div class="kv"><span>версия яндекс музыки</span><span id="a-ym"></span></div>
@@ -253,6 +421,24 @@ button:disabled{cursor:default;opacity:.5}
   </main>
 </div>
 <div class="toast" id="toast"></div>
+<div class="splash" id="splash">
+  <div class="mark">fk</div>
+  <div class="loader">
+    <p>загружаем</p>
+    <div class="words">
+      <span class="word">оригиналы</span>
+      <span class="word">замены</span>
+      <span class="word">обложки</span>
+      <span class="word">мат</span>
+      <span class="word">оригиналы</span>
+    </div>
+  </div>
+  <div class="upd" id="upd" hidden>
+    <div class="upd-msg" id="upd-msg"></div>
+    <div class="upd-bar" id="upd-bar" hidden><i id="upd-fill"></i></div>
+    <button class="btn upd-skip" id="upd-skip" data-act="skipUpdate" hidden>запустить без обновления</button>
+  </div>
+</div>
 
 <script>
 'use strict';
@@ -265,10 +451,11 @@ let tab = 'home';
 try { tab = localStorage.getItem('fkc-tab') || 'home'; } catch (_) {}
 
 const OPTS = [
-  ['autostart', 'запуск вместе с windows', 'fkcensor стартует свёрнутым в трей'],
+  ['autostart', 'запуск вместе с windows', 'стартует свёрнутым в трей'],
   ['restartYM', 'перезапуск яндекс музыки', 'запускать клиент после установки или удаления патча'],
   ['autoUpdate', 'проверка обновлений', 'проверять новую версию при запуске'],
   ['hideToTray', 'сворачивать в трей', 'крестик прячет окно, а не закрывает программу'],
+  ['animations', 'анимации', 'плавные переходы между вкладками и появление элементов'],
 ];
 
 function act(name, arg) {
@@ -289,7 +476,26 @@ function setTab(t) {
   try { localStorage.setItem('fkc-tab', t); } catch (_) {}
   document.querySelectorAll('.nav').forEach((n) => n.classList.toggle('on', n.dataset.tab === t));
   document.querySelectorAll('.page').forEach((p) => p.classList.toggle('on', p.id === t));
+  $('tb-title').textContent = { home: 'главная', history: 'история', settings: 'настройки', about: 'инфо' }[t];
+  movePill();
 }
+
+// Плашка активного пункта меню: при первом показе встаёт на место сразу, дальше — переезжает
+function movePill() {
+  const n = document.querySelector('.nav.on'), p = $('pill');
+  if (!n) return;
+  p.style.transform = `translateY(${n.offsetTop}px)`;
+  p.style.height = n.offsetHeight + 'px';
+  if (p.classList.contains('instant')) {
+    p.offsetWidth; // применить положение без анимации
+    p.classList.remove('instant');
+  }
+}
+
+// Списки перерисовываются, только если что-то поменялось: состояние приходит каждые 2 секунды,
+// и без этого анимации появления проигрывались бы снова и снова
+let npKey = null, npHTML = null;
+let histSig = null, histFilter = null, histKeys = null;
 
 function fmtTime(ms) {
   const d = new Date(ms), now = new Date();
@@ -320,7 +526,7 @@ function statusView(s) {
   }
   return s.enabled
     ? { dot: 'var(--on)', title: 'цензура отключена', btn: 'пауза', dark: false }
-    : { dot: 'var(--off)', title: 'fkcensor на паузе', btn: 'включить', dark: true };
+    : { dot: 'var(--off)', title: 'на паузе', btn: 'включить', dark: true };
 }
 
 function render() {
@@ -331,9 +537,10 @@ function render() {
   // главная
   const v = statusView(s);
   $('st-dot').style.background = v.dot;
+  $('st-dot').classList.toggle('live', v.dot === 'var(--on)' && s.connected);
   $('st-title').textContent = v.title;
   let path = s.ymDir || 'папка не найдена — укажите её в настройках';
-  if (s.patch === 'ok' && !s.connected) path += ' · клиент не запущен';
+  if (s.patch === 'ok' && !s.connected) path += ', клиент не запущен';
   $('st-path').textContent = path;
   const b = $('st-btn');
   b.textContent = v.btn;
@@ -346,32 +553,54 @@ function render() {
   $('unreach').hidden = !(s.connected && !s.reachable);
 
   const np = s.nowPlaying;
-  if (np) {
-    $('np').innerHTML = `<div class="row">${cover(np.artwork, 52)}
-      <div class="meta"><div class="ttl ellipsis">${esc(np.title)}</div><div class="art ellipsis">${esc(np.artist)}${np.playing ? '' : ' · пауза'}</div></div>
-      ${np.replaced ? '<div class="swap"><div class="badge from">clean</div><div class="arrow">→</div><div class="badge to">explicit</div></div>' : ''}</div>`;
-  } else {
-    $('np').innerHTML = `<div class="empty">${s.connected ? 'ничего не играет' : s.patch === 'ok' ? 'яндекс музыка не запущена' : 'появится после установки патча'}</div>`;
+  const key = np ? [np.title, np.artist, np.artwork].join('|') : '';
+  const html = np
+    ? `${cover(np.artwork, 52)}
+      <div class="meta"><div class="ttl ellipsis">${esc(np.title)}</div><div class="art ellipsis">${esc(np.artist)}${np.playing ? '' : ', пауза'}</div></div>
+      ${np.replaced ? '<div class="swap"><div class="badge from">clean</div><div class="arrow">→</div><div class="badge to">explicit</div></div>' : ''}`
+    : `<div class="empty">${s.connected ? 'ничего не играет' : s.patch === 'ok' ? 'яндекс музыка не запущена' : 'появится после установки патча'}</div>`;
+  if (html !== npHTML) {
+    // новый трек проявляется; пауза и смена значка — без анимации
+    $('np').innerHTML = np ? `<div class="row${npKey !== null && key !== npKey ? ' swapin' : ''}">${html}</div>` : html;
+    npHTML = html;
+    npKey = key;
   }
+  $('eq').classList.toggle('on', !!(np && np.playing));
   $('s-today').textContent = num(s.stats.today);
   $('s-total').textContent = num(s.stats.total);
   $('s-failed').textContent = num(s.stats.failed);
 
   // история
   document.querySelectorAll('#filters button').forEach((x) => x.classList.toggle('on', x.dataset.filter === filter));
-  const hist = (s.history || []).filter((h) => filter === 'all' || (filter === 'ok' ? !h.failed : h.failed));
-  $('hist').innerHTML = hist.length
-    ? hist.map((h) => `<div class="hrow">${cover(h.cover, 36)}
+  const hist = (s.history || []).filter((h) => filter === 'all' || (filter === 'ok' ? !h.failed && !h.original : h.failed));
+  const rows = hist.map((h) => ({
+    key: h.time + '|' + h.title,
+    html: `${cover(h.cover, 36)}
         <div class="meta"><div class="ttl ellipsis">${esc(h.title)}</div><div class="art ellipsis">${esc(h.artist)}</div></div>
         <div class="time">${fmtTime(h.time)}</div>
-        <div class="badge ${h.failed ? 'bad' : 'ok'}">${h.failed ? 'не загрузилось' : 'заменён'}</div></div>`).join('')
-    : `<div class="empty">${filter === 'all' ? 'пока пусто — включите трек из списка замен' : 'нет записей'}</div>`;
+        <div class="badge ${h.failed || h.original ? 'bad' : 'ok'}">${h.failed ? 'не загрузилось' : h.original ? 'без замены' : 'заменён'}</div>`,
+  }));
+  const sig = filter + '#' + rows.map((r) => r.key + r.html).join('');
+  if (sig !== histSig) {
+    const el = $('hist');
+    const refilter = filter !== histFilter;
+    // смена фильтра — все строки по очереди; новая запись в том же фильтре — выезжает только она
+    el.classList.toggle('stagger', refilter);
+    el.innerHTML = rows.length
+      ? rows.map((r, i) => `<div class="hrow${!refilter && histKeys && !histKeys.has(r.key) ? ' new' : ''}" style="--i:${i}">${r.html}</div>`).join('')
+      : `<div class="empty">${filter === 'all' ? 'пока пусто — включите любой трек в яндекс музыке' : 'нет записей'}</div>`;
+    histSig = sig;
+    histFilter = filter;
+    histKeys = new Set(rows.map((r) => r.key));
+  }
 
-  // настройки
+  // настройки: переключатели создаются один раз, дальше меняется только класс — чтобы рычажок переезжал
   $('ym-path').textContent = s.ymDir || 'не найдена';
-  $('opts').innerHTML = OPTS.map(([k, label, desc]) =>
-    `<button class="opt${s.settings[k] ? ' on' : ''}" data-opt="${k}"><div class="txt"><b>${label}</b><span>${desc}</span></div><div class="sw"></div></button>`).join('');
-  document.querySelectorAll('#fallback button').forEach((x) => x.classList.toggle('on', x.dataset.value === s.settings.fallback));
+  if (!$('opts').children.length) {
+    $('opts').innerHTML = OPTS.map(([k, label, desc]) =>
+      `<button class="opt" data-opt="${k}"><div class="txt"><b>${label}</b><span>${desc}</span></div><div class="sw"></div></button>`).join('');
+  }
+  $('opts').querySelectorAll('.opt').forEach((o) => o.classList.toggle('on', !!s.settings[o.dataset.opt]));
   const busy = !!s.busy, noym = s.patch === 'noym';
   $('b-reinstall').disabled = busy || noym;
   $('b-reinstall').textContent = s.patch === 'ok' ? 'переустановить' : 'установить';
@@ -379,11 +608,17 @@ function render() {
   $('b-restart').disabled = busy || noym;
 
   // инфо
-  $('about-sub').textContent = `fkcensor ${s.version} · go ${s.goVersion} · windows ${s.arch === 'amd64' ? 'x64' : s.arch}`;
+  if (!$('about-sub').dataset.ready) {
+    // название со спойлером — разметка один раз, дальше меняется только текст версии
+    $('about-sub').innerHTML = 'f<span class="spoiler">u</span>ckcensor <span id="about-ver"></span>';
+    $('about-sub').dataset.ready = '1';
+    initSpoilers($('about-sub'));
+  }
+  $('about-ver').textContent = `${s.version}, go ${s.goVersion}, windows ${s.arch === 'amd64' ? 'x64' : s.arch}, by s4yn3x w/ <3`;
   const u = s.update;
-  $('a-check').textContent = u.checking ? 'проверяем…' : u.checked ? fmtTime(u.checked) + (u.message ? ' · ' + u.message : '') : 'не проверялось';
+  $('a-check').textContent = u.checking ? 'проверяем…' : u.checked ? fmtTime(u.checked) + (u.message ? ' — ' + u.message : '') : 'не проверялось';
   const patchText = { ok: 'патч установлен', outdated: 'патч устарел', broken: 'патч повреждён', none: 'патч не установлен', noym: '' }[s.patch];
-  $('a-ym').textContent = s.ymVersion ? `${s.ymVersion} · ${patchText}` : 'не найдена';
+  $('a-ym').textContent = s.ymVersion ? `${s.ymVersion}, ${patchText}` : 'не найдена';
   $('a-list').textContent = s.connected && s.listCount ? num(s.listCount) : '—';
   const ub = $('b-update');
   ub.disabled = u.checking;
@@ -391,7 +626,200 @@ function render() {
   ub.onclick = () => (u.newer ? act('open', u.url) : act('checkUpdate'));
 }
 
-window.fkcPush = (state) => { S = state; render(); };
+// Тема: «как в системе» следует теме Windows; шапку окна красит сама программа
+const darkQuery = matchMedia('(prefers-color-scheme: dark)');
+let appliedTheme = null;
+function applyTheme(pref) {
+  const theme = pref === 'dark' || (pref !== 'light' && darkQuery.matches) ? 'dark' : 'light';
+  document.querySelectorAll('#theme button').forEach((x) => x.classList.toggle('on', x.dataset.themeValue === (pref || 'system')));
+  if (theme === appliedTheme) return;
+  if (appliedTheme) {
+    // цвета перетекают, а не переключаются рывком; при запуске тема ставится сразу
+    const root = document.documentElement;
+    root.classList.add('theming');
+    clearTimeout(applyTheme.timer);
+    applyTheme.timer = setTimeout(() => root.classList.remove('theming'), 400);
+  }
+  appliedTheme = theme;
+  document.documentElement.dataset.theme = theme;
+  try { localStorage.setItem('fkc-theme-applied', theme); } catch (_) {}
+  act('titlebar', theme === 'dark');
+}
+darkQuery.addEventListener('change', () => S && applyTheme(S.settings.theme));
+
+// Заставка держится хотя бы полторы секунды, чтобы слова успели смениться. Потом программа
+// разворачивает окно в обычное, и блоки страницы появляются уже с данными.
+// Без анимаций окно сразу открывается обычным, без заставки.
+const bootStart = performance.now();
+let booted = false;
+function ready() {
+  if (booted) return;
+  // на заставке идёт обновление — окно откроется, когда оно закончится или будет пропущено
+  if (window.fkcUpdate && S && S.startup && S.startup.phase && S.startup.phase !== 'done') return;
+  booted = true;
+  const show = () => document.body.classList.remove('boot');
+  if (!window.fkcSplash) { show(); reveal(); return; }
+  const quick = !S || !S.settings.animations || matchMedia('(prefers-reduced-motion: reduce)').matches;
+  setTimeout(() => {
+    $('splash').classList.add('gone');
+    // окно на время перестройки спрятано; страница поднимается, когда оно уже большое
+    act('expand').then(() => {
+      if (appliedTheme) act('titlebar', appliedTheme === 'dark');
+      requestAnimationFrame(show);
+    });
+  }, quick ? 0 : Math.max(0, 1500 - (performance.now() - bootStart)));
+}
+setTimeout(ready, 3000); // если программа долго не отвечает — показать как есть
+
+// Окно скрыто, пока страница не готова: показываем его, когда шрифт загружен и страница
+// нарисована, — иначе оно мелькает прозрачным и с запасным шрифтом
+let revealed = false;
+function reveal() {
+  if (revealed) return;
+  revealed = true;
+  // Сначала раскладка: только после неё браузер запрашивает шрифт, иначе fonts.ready
+  // срабатывает сразу. Потом ждём шрифт и два кадра. Первый кадр WebView выводит в окно
+  // заметно позже, чем страница о нём сообщает (замерено ~140 мс), поэтому ещё запас 200 мс —
+  // иначе окно на мгновение появляется пустым
+  void document.body.offsetHeight;
+  const frame = () => new Promise((r) => requestAnimationFrame(() => r()));
+  const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+  document.fonts.ready.then(frame).then(frame).then(() => wait(200))
+    .then(() => window.fkcWindow && window.fkcWindow('reveal'));
+}
+
+// Спойлер как в Telegram: над буквой — облако точек, которые рождаются, плывут в случайную
+// сторону и гаснут. Цвет точек — цвет текста вокруг, поэтому спойлер подходит к любой теме
+function initSpoilers(root) {
+  (root || document).querySelectorAll('.spoiler:not([data-ready])').forEach((sp) => {
+    sp.dataset.ready = '1';
+    const canvas = document.createElement('canvas');
+    sp.appendChild(canvas);
+    const ctx = canvas.getContext('2d');
+    let w = 0, h = 0, dpr = 1, parts = [], color = '#fff', last = performance.now(), colorAt = 0;
+    const spawn = (p = {}) => Object.assign(p, {
+      x: Math.random() * w, y: Math.random() * h,
+      vx: (Math.random() - 0.5) * 14, vy: (Math.random() - 0.5) * 14,
+      life: 0, speed: 0.35 + Math.random() * 0.9, r: 0.45 + Math.random() * 0.6,
+    });
+    function resize() {
+      const r = canvas.getBoundingClientRect();
+      dpr = window.devicePixelRatio || 1;
+      w = r.width; h = r.height;
+      canvas.width = Math.max(1, Math.round(w * dpr));
+      canvas.height = Math.max(1, Math.round(h * dpr));
+      // плотность как в Telegram: точки почти сплошь закрывают букву
+      const n = Math.max(12, Math.round((w * h) / 5));
+      parts = Array.from({ length: n }, () => { const p = spawn(); p.life = Math.random(); return p; });
+    }
+    function frame(t) {
+      const dt = Math.min(0.05, (t - last) / 1000);
+      last = t;
+      if (!sp.isConnected) return;
+      // невидимый спойлер (другая вкладка, открытый) не рисуем — экономим процессор
+      if (sp.offsetParent === null || sp.classList.contains('open')) { requestAnimationFrame(frame); return; }
+      const r = canvas.getBoundingClientRect();
+      if (Math.abs(r.width - w) > 0.5 || Math.abs(r.height - h) > 0.5) resize();
+      if (t - colorAt > 500) { color = getComputedStyle(sp.parentElement).color; colorAt = t; }
+      const still = document.documentElement.classList.contains('no-anim');
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.clearRect(0, 0, w, h);
+      ctx.fillStyle = color;
+      for (const p of parts) {
+        if (!still) {
+          p.life += dt * p.speed;
+          if (p.life >= 1) spawn(p);
+          p.x += p.vx * dt; p.y += p.vy * dt;
+        }
+        ctx.globalAlpha = still ? 0.7 : Math.sin(p.life * Math.PI);
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      requestAnimationFrame(frame);
+    }
+    sp.addEventListener('click', (e) => {
+      e.stopPropagation();
+      sp.classList.toggle('open');
+    });
+    requestAnimationFrame((t) => { resize(); last = t; frame(t); });
+  });
+}
+initSpoilers();
+
+// Масштаб интерфейса: меняется сразу, без перезапуска; окно программа подгоняет сама
+let zoomApplied = window.fkcZoom || 1;
+function applyZoom() {
+  const pct = S.settings.uiScale || 100;
+  document.querySelectorAll('#scale button').forEach((x) => x.classList.toggle('on', Number(x.dataset.scale) === pct));
+  if (pct / 100 !== zoomApplied) {
+    zoomApplied = pct / 100;
+    document.documentElement.style.zoom = zoomApplied;
+    movePill();
+  }
+}
+
+// Обновление при запуске: что показывает заставка
+function renderUpdate() {
+  const u = window.fkcUpdate && S && S.startup;
+  if (!u) return;
+  const ph = u.phase;
+  const pct = Math.round((u.progress || 0) * 100);
+  const msg = {
+    checking: 'проверяем обновления',
+    downloading: `скачиваем ${u.version} — ${pct}%`,
+    installing: `устанавливаем ${u.version}`,
+    restarting: `запускаем ${u.version}`,
+  }[ph];
+  $('upd').hidden = !msg;
+  $('upd-msg').textContent = msg || '';
+  $('upd-bar').hidden = !['downloading', 'installing', 'restarting'].includes(ph);
+  $('upd-fill').style.width = (ph === 'downloading' ? pct : 100) + '%';
+  $('upd-skip').hidden = !(u.slow && (ph === 'checking' || ph === 'downloading'));
+}
+if (window.fkcUpdate) act('startupUpdate');
+
+window.fkcPush = (state) => {
+  S = state;
+  renderUpdate();
+  document.documentElement.classList.toggle('no-anim', !S.settings.animations);
+  applyTheme(S.settings.theme);
+  applyZoom();
+  render();
+  ready();
+};
+
+// Своя шапка: программа передаёт нажатия окну как нажатия на системный заголовок,
+// поэтому перетаскивание, прилипание к краям и растягивание работают как обычно
+const win = (cmd) => window.fkcWindow
+  ? window.fkcWindow(cmd).then((maxed) => {
+      document.documentElement.classList.toggle('maxed', maxed);
+      $('tb-max').title = maxed ? 'свернуть в окно' : 'развернуть';
+    }).catch(() => {})
+  : Promise.resolve();
+let lastDown = 0;
+$('titlebar').addEventListener('mousedown', (e) => {
+  if (e.button !== 0) return;
+  const btn = e.target.closest('.tb-btn');
+  if (btn) return;
+  const edge = e.target.closest('.tb-edge');
+  if (edge) {
+    const i = [...edge.children].indexOf(e.target);
+    return void win(i === 0 ? 'resizeTopLeft' : i === 1 ? 'resizeTopRight' : 'resizeTop');
+  }
+  // двойной щелчок по шапке разворачивает окно; одиночное нажатие — перетаскивание
+  const now = Date.now();
+  if (now - lastDown < 400) { lastDown = 0; return void win('maximize'); }
+  lastDown = now;
+  win('drag');
+});
+$('titlebar').addEventListener('click', (e) => {
+  const btn = e.target.closest('.tb-btn');
+  if (btn) win(btn.dataset.win);
+});
+let resizeTimer = 0;
+addEventListener('resize', () => { clearTimeout(resizeTimer); resizeTimer = setTimeout(() => win('state'), 100); });
+win('state');
 
 document.addEventListener('click', (e) => {
   const t = e.target.closest('button');
@@ -400,11 +828,18 @@ document.addEventListener('click', (e) => {
   else if (t.dataset.act) act(t.dataset.act);
   else if (t.dataset.filter) { filter = t.dataset.filter; render(); }
   else if (t.dataset.opt) act('setting', { key: t.dataset.opt, value: !S.settings[t.dataset.opt] });
-  else if (t.dataset.value) act('setting', { key: 'fallback', value: t.dataset.value });
+  else if (t.dataset.themeValue) {
+    // сначала сохранить тему: по ней программа выбирает иконку, когда окно красит шапку
+    act('setting', { key: 'theme', value: t.dataset.themeValue });
+    applyTheme(t.dataset.themeValue);
+  }
+  else if (t.dataset.scale) act('setting', { key: 'uiScale', value: Number(t.dataset.scale) });
   else if (t.dataset.open !== undefined && S) act('open', S.repoUrl + t.dataset.open);
 });
 
 setTab(['home', 'history', 'settings', 'about'].includes(tab) ? tab : 'home');
+// заставке данные не нужны — её можно показать сразу
+if (window.fkcSplash) reveal();
 window.fkcState().then(window.fkcPush);
 // Подстраховка: если обновление от программы потерялось, окно само запросит состояние
 setInterval(() => window.fkcState().then(window.fkcPush).catch(() => {}), 2000);

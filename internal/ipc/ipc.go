@@ -1,7 +1,7 @@
 // Package ipc — локальный HTTP-сервер, через который скрипт в Яндекс Музыке
 // и вторая копия программы общаются с работающей программой.
 //
-// Адрес и токен лежат в %LOCALAPPDATA%\FkCensor\ipc.json. Без токена запросы
+// Адрес и токен лежат в %LOCALAPPDATA%\F_ckCensor\ipc.json. Без токена запросы
 // отклоняются: так сайты в браузере не смогут дёргать программу через localhost.
 package ipc
 
@@ -25,6 +25,9 @@ type NowPlaying struct {
 	Artist  string `json:"artist"`
 	Artwork string `json:"artwork"`
 	Playing bool   `json:"playing"`
+	TrackID string `json:"trackId"`
+	// Replaced — трек сейчас подменяется (своя подмена или замена из базы)
+	Replaced bool `json:"replaced"`
 }
 
 type Event struct {
@@ -60,8 +63,9 @@ type info struct {
 
 func infoPath(dir string) string { return filepath.Join(dir, "ipc.json") }
 
-// Serve запускает сервер и записывает ipc.json. Возвращает функцию остановки.
-func Serve(dir string, h Handler) (func(), error) {
+// Serve запускает сервер и записывает ipc.json в dir и в каждую из mirrors
+// (папки, где его ищут патчи прежних версий). Возвращает функцию остановки.
+func Serve(dir string, h Handler, mirrors ...string) (func(), error) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		return nil, err
@@ -100,8 +104,21 @@ func Serve(dir string, h Handler) (func(), error) {
 		srv.Close()
 		return nil, err
 	}
+	// копии для патчей прежних версий: они ищут ipc.json в своей папке
+	written := []string{infoPath(dir)}
+	for _, m := range mirrors {
+		if m == dir {
+			continue
+		}
+		_ = os.MkdirAll(m, 0755)
+		if os.WriteFile(infoPath(m), raw, 0600) == nil {
+			written = append(written, infoPath(m))
+		}
+	}
 	return func() {
-		_ = os.Remove(infoPath(dir))
+		for _, p := range written {
+			_ = os.Remove(p)
+		}
 		_ = srv.Close()
 	}, nil
 }

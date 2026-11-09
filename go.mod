@@ -1,4 +1,4 @@
-module github.com/S4YN3X/FkCensor
+module github.com/S4YN3X/F_ckCensor
 
 go 1.25.0
 

@@ -34,10 +34,16 @@ var (
 	procSHGetPathFromIDListW     = shell32.NewProc("SHGetPathFromIDListW")
 	procCoInitializeEx           = ole32.NewProc("CoInitializeEx")
 	procCoTaskMemFree            = ole32.NewProc("CoTaskMemFree")
+	procSetWindowPos             = user32.NewProc("SetWindowPos")
+
+	dwmapi                    = windows.NewLazySystemDLL("dwmapi.dll")
+	procDwmSetWindowAttribute = dwmapi.NewProc("DwmSetWindowAttribute")
 )
 
 const (
-	appID  = "FkCensor"
+	appID  = "F_ckCensor"
+	// legacyAppID — запись автозапуска под старым названием: убираем при переезде
+	legacyAppID = "FkCensor"
 	runKey = `Software\Microsoft\Windows\CurrentVersion\Run`
 )
 
@@ -68,6 +74,7 @@ func SetAutostart(on bool) error {
 		return err
 	}
 	defer k.Close()
+	_ = k.DeleteValue(legacyAppID)
 	if !on {
 		if err := k.DeleteValue(appID); err != nil && err != registry.ErrNotExist {
 			return err
@@ -82,9 +89,9 @@ func SetAutostart(on bool) error {
 }
 
 // RegisterNotifications регистрирует AppUserModelID, чтобы уведомления
-// подписывались «FkCensor» и показывались с иконкой программы.
+// подписывались «F_ckCensor» и показывались с иконкой программы.
 func RegisterNotifications(ico []byte) {
-	iconPath := filepath.Join(os.Getenv("LOCALAPPDATA"), "FkCensor", "icon.ico")
+	iconPath := filepath.Join(os.Getenv("LOCALAPPDATA"), "F_ckCensor", "icon.ico")
 	_ = os.MkdirAll(filepath.Dir(iconPath), 0755)
 	_ = os.WriteFile(iconPath, ico, 0644)
 
@@ -93,7 +100,7 @@ func RegisterNotifications(ico []byte) {
 		return
 	}
 	defer k.Close()
-	_ = k.SetStringValue("DisplayName", "FkCensor")
+	_ = k.SetStringValue("DisplayName", "F_ckCensor")
 	_ = k.SetStringValue("IconUri", iconPath)
 }
 
@@ -166,48 +173,101 @@ func PickFolder(owner uintptr, title string) string {
 	return windows.UTF16ToString(path)
 }
 
-// SetWindowIcon ставит окну иконки 16 и 32 px из .ico-файла.
+// SetWindowIcon ставит окну маленькую и большую иконку из .ico-файла — под размеры,
+// которые Windows просит при текущем масштабе экрана (на 150% это 24 и 48 px).
 func SetWindowIcon(hwnd uintptr, ico []byte) {
 	const wmSetIcon, iconSmall, iconBig = 0x0080, 0, 1
-	if h := iconFromICO(ico, 16); h != 0 {
+	const smCxIcon, smCxSmIcon = 11, 49
+	small, _, _ := procGetSysMetrics.Call(smCxSmIcon)
+	big, _, _ := procGetSysMetrics.Call(smCxIcon)
+	if h := iconFromICO(ico, int(small)); h != 0 {
 		procSendMessageW.Call(hwnd, wmSetIcon, iconSmall, h)
 	}
-	if h := iconFromICO(ico, 32); h != 0 {
+	if h := iconFromICO(ico, int(big)); h != 0 {
 		procSendMessageW.Call(hwnd, wmSetIcon, iconBig, h)
 	}
 }
 
+// AppsDark — тёмная ли тема приложений Windows (её же страница видит как prefers-color-scheme).
+func AppsDark() bool {
+	k, err := registry.OpenKey(registry.CURRENT_USER, `Software\Microsoft\Windows\CurrentVersion\Themes\Personalize`, registry.QUERY_VALUE)
+	if err != nil {
+		return false
+	}
+	defer k.Close()
+	v, _, err := k.GetIntegerValue("AppsUseLightTheme")
+	return err == nil && v == 0
+}
+
+// TaskbarDark — тёмная ли панель задач Windows (по умолчанию в Windows 11 — тёмная).
+func TaskbarDark() bool {
+	k, err := registry.OpenKey(registry.CURRENT_USER, `Software\Microsoft\Windows\CurrentVersion\Themes\Personalize`, registry.QUERY_VALUE)
+	if err != nil {
+		return true
+	}
+	defer k.Close()
+	v, _, err := k.GetIntegerValue("SystemUsesLightTheme")
+	return err != nil || v == 0
+}
+
+// iconFromICO берёт из .ico запись нужного размера: ровно size, иначе ближайшую побольше,
+// иначе самую большую — Windows уменьшит её сама.
 func iconFromICO(ico []byte, size int) uintptr {
-	if len(ico) < 6 {
+	if len(ico) < 6 || size <= 0 {
 		return 0
 	}
 	count := int(binary.LittleEndian.Uint16(ico[4:6]))
+	best, bestW := -1, 0
 	for i := 0; i < count; i++ {
 		e := 6 + 16*i
 		if e+16 > len(ico) {
-			return 0
+			break
 		}
 		w := int(ico[e])
 		if w == 0 {
 			w = 256
 		}
-		if w != size {
-			continue
+		better := best < 0 ||
+			(w >= size && (bestW < size || w < bestW)) ||
+			(w < size && bestW < size && w > bestW)
+		if better {
+			best, bestW = e, w
 		}
-		n := binary.LittleEndian.Uint32(ico[e+8:])
-		off := binary.LittleEndian.Uint32(ico[e+12:])
-		if int(off+n) > len(ico) {
-			return 0
-		}
-		img := ico[off : off+n]
-		h, _, _ := procCreateIconFromResourceEx.Call(uintptr(unsafe.Pointer(&img[0])), uintptr(n), 1, 0x00030000, uintptr(size), uintptr(size), 0)
-		return h
 	}
-	return 0
+	if best < 0 {
+		return 0
+	}
+	n := binary.LittleEndian.Uint32(ico[best+8:])
+	off := binary.LittleEndian.Uint32(ico[best+12:])
+	if n == 0 || int(off+n) > len(ico) {
+		return 0
+	}
+	img := ico[off : off+n]
+	h, _, _ := procCreateIconFromResourceEx.Call(uintptr(unsafe.Pointer(&img[0])), uintptr(n), 1, 0x00030000, uintptr(size), uintptr(size), 0)
+	return h
+}
+
+// SetDarkTitleBar красит системную шапку окна в тёмный или возвращает светлую.
+func SetDarkTitleBar(hwnd uintptr, dark bool) {
+	if procDwmSetWindowAttribute.Find() != nil {
+		return
+	}
+	var v uint32
+	if dark {
+		v = 1
+	}
+	// DWMWA_USE_IMMERSIVE_DARK_MODE: 20 в Windows 10 20H1+ и 11, 19 в более старых сборках
+	if r, _, _ := procDwmSetWindowAttribute.Call(hwnd, 20, uintptr(unsafe.Pointer(&v)), 4); r != 0 {
+		procDwmSetWindowAttribute.Call(hwnd, 19, uintptr(unsafe.Pointer(&v)), 4)
+	}
+	// Перерисовать рамку, иначе в Windows 10 шапка сменится только после переключения окон
+	const swpNoSize, swpNoMove, swpNoZOrder, swpNoActivate, swpFrameChanged = 0x1, 0x2, 0x4, 0x10, 0x20
+	procSetWindowPos.Call(hwnd, 0, 0, 0, 0, 0, swpNoSize|swpNoMove|swpNoZOrder|swpNoActivate|swpFrameChanged)
 }
 
 // BringToFront разворачивает окно и выводит его на передний план.
 func BringToFront(hwnd uintptr) {
+	Reveal(hwnd) // окно могло ещё ждать отрисовки страницы — показываем как есть
 	const swRestore = 9
 	procShowWindow.Call(hwnd, swRestore)
 	procSetForegroundWindow.Call(hwnd)

@@ -2,9 +2,14 @@
 ;(function() {
     'use strict';
 
-    const LIST_URL = 'https://raw.githubusercontent.com/Hazzz895/FckCensorData/refs/heads/main/list_v2.json';
+    // Списки замен в формате list_v2.json. При совпадении id важнее тот, что выше:
+    // свой репозиторий позволяет добавлять треки и поправлять замены из общей базы.
+    const LISTS = [
+        { name: 'FkCensorData', url: 'https://raw.githubusercontent.com/S4YN3X/FkCensorData/refs/heads/main/list_v2.json' },
+        { name: 'FckCensorData', url: 'https://raw.githubusercontent.com/Hazzz895/FckCensorData/refs/heads/main/list_v2.json' },
+    ];
     const SYNC_MS  = 10 * 60 * 1000;
-    const APP_SYNC_MS = 2000;        // обмен с программой FkCensor
+    const APP_SYNC_MS = 2000;        // обмен с программой F_ckCensor
     const RECHECK_MS  = 60 * 1000;   // повторная проверка хранилища замен после ошибки
     // Версия аддона FckCensor, формат данных которой мы понимаем.
     // Источники из list_v2.json помечены supportedVersions относительно неё.
@@ -14,23 +19,23 @@
     let replacements = {};
     // Подмены метаданных из list_v2.json: названия, обложки, трек-листы альбомов, вставки в профили
     let meta = { tracks: {}, albums: {}, artists: {}, insertions: {}, trackAlbums: {} };
-    // Подмена работает, только пока программа FkCensor запущена и не на паузе
+    // Подмена работает, только пока программа F_ckCensor запущена и не на паузе
     let enabledByApp = false;
     // Хранилище замен отвечает (GitHub бывает заблокирован)
     let reachable = true;
     let lastRecheck = 0;
     let pushedActive = null;
 
-    // Папка данных FkCensor: %LOCALAPPDATA%\FkCensor в Windows, ~/Library/Application Support/FkCensor в macOS
+    // Папка данных F_ckCensor: %LOCALAPPDATA%\F_ckCensor в Windows, ~/Library/Application Support/F_ckCensor в macOS
     const DATA_DIR = process.platform === 'win32'
-        ? require('path').join(process.env.LOCALAPPDATA || '', 'FkCensor')
-        : require('path').join(require('os').homedir(), 'Library', 'Application Support', 'FkCensor');
+        ? require('path').join(process.env.LOCALAPPDATA || '', 'F_ckCensor')
+        : require('path').join(require('os').homedir(), 'Library', 'Application Support', 'F_ckCensor');
 
-    // Лог главного процесса и сообщений [FkCensor] из окна
+    // Лог главного процесса и сообщений [F_ckCensor] из окна
     const LOG_PATH = require('path').join(DATA_DIR, 'ym.log');
     function log(...args) {
         const text = args.map((a) => (typeof a === 'string' ? a : (a instanceof Error ? a.message : JSON.stringify(a)))).join(' ');
-        console.log('[FkCensor] ' + text);
+        console.log('[F_ckCensor] ' + text);
         try { require('fs').appendFileSync(LOG_PATH, `[${new Date().toISOString()}] ${text}\n`); } catch(_) {}
     }
     try {
@@ -183,41 +188,76 @@
         }
     }
 
-    function loadList() {
+    // Последний удачно загруженный вариант каждого списка: сбой одного не стирает его треки
+    const loadedLists = {};
+
+    function fetchList(list) {
         return new Promise((resolve) => {
             try {
-                const req = require('electron').net.request(LIST_URL);
+                const req = require('electron').net.request(list.url);
                 const chunks = [];
                 req.on('response', (res) => {
                     res.on('data', (chunk) => { chunks.push(chunk); });
                     res.on('end', () => {
                         if (res.statusCode !== 200) {
-                            log('list HTTP', res.statusCode);
-                            return resolve(false);
+                            log(list.name + ': HTTP', res.statusCode);
+                            return resolve(null);
                         }
                         try {
-                            const parsed = parseListV2(JSON.parse(Buffer.concat(chunks).toString('utf8')));
-                            const count = Object.keys(parsed.replacements).length;
-                            if (count === 0) {
-                                // Пустой результат почти наверняка значит смену формата — старый список не трогаем
-                                log('list_v2: не найдено ни одного трека');
-                                return resolve(false);
-                            }
-                            replacements = parsed.replacements;
-                            meta = parsed.meta;
-                            log('Загружено треков:', count, '· подмен метаданных: треков', Object.keys(meta.tracks).length,
-                                'альбомов', Object.keys(meta.albums).length, 'профилей', Object.keys(meta.insertions).length);
-                            resolve(true);
+                            resolve(parseListV2(JSON.parse(Buffer.concat(chunks).toString('utf8'))));
                         } catch(e) {
-                            log('parse error:', e.message);
-                            resolve(false);
+                            log(list.name + ': parse error:', e.message);
+                            resolve(null);
                         }
                     });
                 });
-                req.on('error', (e) => { log('net error:', e.message); resolve(false); });
+                req.on('error', (e) => { log(list.name + ': net error:', e.message); resolve(null); });
                 req.end();
-            } catch(e) { log('loadList crash:', e.message); resolve(false); }
+            } catch(e) { log(list.name + ': crash:', e.message); resolve(null); }
         });
+    }
+
+    // Объединение списков: при совпадении id побеждает список, который выше в LISTS;
+    // вставки в профили исполнителей складываются
+    function mergeLists(parsedLists) {
+        const out = { replacements: {}, meta: { tracks: {}, albums: {}, artists: {}, insertions: {}, trackAlbums: {} } };
+        for (const p of parsedLists) {
+            mergeFirst(out.replacements, p.replacements);
+            for (const k of ['tracks', 'albums', 'artists', 'trackAlbums']) mergeFirst(out.meta[k], p.meta[k]);
+            for (const [artistId, ins] of Object.entries(p.meta.insertions)) {
+                const cur = out.meta.insertions[artistId] = out.meta.insertions[artistId] || { tracks: [], albums: [] };
+                cur.tracks = [...cur.tracks, ...(ins.tracks || [])];
+                cur.albums = [...cur.albums, ...(ins.albums || [])];
+            }
+        }
+        return out;
+    }
+
+    async function loadList() {
+        const results = await Promise.all(LISTS.map((l) => fetchList(l)));
+        let updated = false;
+        LISTS.forEach((l, i) => {
+            const p = results[i];
+            if (!p) return;
+            const count = Object.keys(p.replacements).length;
+            const prev = loadedLists[l.name];
+            // Пустой список вместо непустого почти наверняка значит смену формата — старый не трогаем
+            if (count === 0 && prev && Object.keys(prev.replacements).length > 0) {
+                log(l.name + ': не найдено ни одного трека, оставляю прошлый список');
+                return;
+            }
+            loadedLists[l.name] = p;
+            updated = true;
+            log(l.name + ': треков', count, '· подмен метаданных', Object.keys(p.meta.tracks).length);
+        });
+        if (!updated) return false;
+
+        const merged = mergeLists(LISTS.map((l) => loadedLists[l.name]).filter(Boolean));
+        replacements = merged.replacements;
+        meta = merged.meta;
+        log('Загружено треков:', Object.keys(replacements).length, '· подмен метаданных: треков', Object.keys(meta.tracks).length,
+            'альбомов', Object.keys(meta.albums).length, 'профилей', Object.keys(meta.insertions).length);
+        return true;
     }
 
     function isActive() {
@@ -255,11 +295,20 @@
         const m = ms && ms.metadata;
         if (m && m.title) {
             const art = (m.artwork || []).slice(-1)[0];
+            // id трека — из ссылки на название в плеере
+            let trackId = '';
+            const link = document.querySelector('[class*="CommonLayout_playerBar__"] a[data-test-id="TRACK_TITLE"]');
+            if (link) {
+                try { trackId = new URL(link.getAttribute('href'), location.href).searchParams.get('trackId') || ''; } catch (_) {}
+            }
+            if (!trackId) trackId = trackIdFromFiber(document.querySelector('[data-test-id="VIBE_PLAYERBAR"]')) || '';
             nowPlaying = {
                 title: m.title,
                 artist: m.artist || '',
                 artwork: art ? art.src : '',
                 playing: ms.playbackState !== 'paused',
+                trackId,
+                replaced: !!(trackId && getReplacementUrl(trackId)),
             };
         }
         return { events, nowPlaying };
@@ -288,7 +337,7 @@
     const isArtistDto = (o) => 'name' in o && !('title' in o) && ('various' in o || 'composer' in o || 'cover' in o || 'genres' in o || 'counts' in o);
 
     function albumSpoof(id) {
-        const raw = getMeta().albums[id];
+        const raw = albumMeta(id);
         if (!raw) return null;
         const a = withoutMeta(raw);
         // трек-лист меняем только в ответе альбома (applyAlbumVolumes), здесь — счётчики
@@ -311,8 +360,22 @@
         if (s) Object.assign(a, withoutMeta(s));
     }
 
+    // Удалённого альбома (или альбома с таким id нет вовсе) API отдаёт заглушку { id, error: 'not-found' }.
+    // Если альбом есть в списке замен, собираем его из записи: клиент покажет его как обычный
+    const ALBUM_DEFAULTS = {
+        title: 'Без названия', type: 'album', metaType: 'music', availableForPremiumUsers: true, availableForMobile: true,
+        availablePartially: false, labels: [], genre: '', artists: [], trackCount: 0, likesCount: 0, recent: false,
+        veryImportant: false, bests: [], disclaimers: [], sortOrder: 'asc',
+    };
+    function reviveAlbum(a) {
+        delete a.error;
+        for (const [k, v] of Object.entries(ALBUM_DEFAULTS)) if (a[k] === undefined) a[k] = Array.isArray(v) ? [] : v;
+        a.available = true;
+    }
+
     function applyAlbum(a) {
         const s = albumSpoof(idOf(a));
+        if (s && a.error) reviveAlbum(a);
         if (s) Object.assign(a, s);
         // сингл: название, обложка и исполнители берутся из подмены его единственного трека
         if (Array.isArray(a.volumes) && a.volumes.length === 1 && a.volumes[0].length === 1) {
@@ -332,13 +395,12 @@
         if (local && local.title) s.title = local.title;
         if (local && local.durationMs) s.durationMs = local.durationMs;
         const unblock = !!getReplacementUrl(id);
-        if (isEmpty(s) && !unblock) {
-            (t.artists || []).forEach(applyArtist);
-            (t.albums || []).forEach(applyAlbum);
-            return;
+        // У трека может не быть своей подмены, но его альбом подменён: тогда трек всё равно
+        // получает обложку альбома и, если включено, исполнителей альбома
+        if (!isEmpty(s) || unblock) {
+            if (s.coverUri && !s.ogImage) s.ogImage = s.coverUri;
+            Object.assign(t, s);
         }
-        if (s.coverUri && !s.ogImage) s.ogImage = s.coverUri;
-        Object.assign(t, s);
         if (unblock) {
             // недоступный трек с заменой — делаем доступным, звук подставит хук file-info
             t.available = true;
@@ -353,7 +415,7 @@
                 for (const a of t.albums) {
                     const uri = (a.cover && a.cover.uri) || a.coverUri || a.ogImage;
                     if (!('coverUri' in s) && !('ogImage' in s) && uri) t.coverUri = t.ogImage = uri;
-                    const fc = (m.albums[idOf(a)] || {}).__fckCensor || {};
+                    const fc = (albumMeta(idOf(a)) || {}).__fckCensor || {};
                     if (!('artists' in s) && a.artists && fc.replaceArtistsInAlbumVolumes) t.artists = a.artists;
                 }
             }
@@ -366,10 +428,10 @@
                 if (!t.coverUri && as.coverUri) t.coverUri = t.ogImage = as.coverUri;
             }
         }
-        if (t.available && Array.isArray(t.disclaimers)) {
+        if ((!isEmpty(s) || unblock) && t.available && Array.isArray(t.disclaimers)) {
             t.disclaimers = t.disclaimers.filter((d) => !String(d).includes(RKN_DISCLAIMER));
         }
-        // обложку, которую увидит клиент, запоминаем для истории FkCensor:
+        // обложку, которую увидит клиент, запоминаем для истории F_ckCensor:
         // у удалённых треков публичный API обложки не отдаёт
         if (unblock && t.coverUri) window.__fkcCovers[id] = t.coverUri;
     }
@@ -398,26 +460,233 @@
         });
     }
 
-    // Публичный API Яндекс Музыки отдаёт и удалённые треки; ответ тоже пройдёт через подмену
+    // ---- Свои треки: аудиофайл пользователя, которого нет в Яндекс Музыке ----
+    // У них id из своего диапазона (у аддона FckCensor свой, около 5·10^14 — не пересекаемся).
+    // Сервер о таких id не знает: в запросах к API их вырезаем, а данные трека добавляем
+    // в ответ сами. Звук отдаёт тот же хук file-info, что и у своих подмен.
+    const CUSTOM_BASE = 600000000000000;
+    const CUSTOM_LIMIT = 1000000;
+    const CUSTOM_SEQ = 'fkc-custom-seq';
+
+    function isCustomId(id) {
+        const n = Number(String(id).split(':')[0]);
+        return n >= CUSTOM_BASE && n < CUSTOM_BASE + CUSTOM_LIMIT;
+    }
+
+    function allocCustomId() {
+        let n = 0;
+        try { n = Number(localStorage.getItem(CUSTOM_SEQ) || '0') || 0; } catch (_) {}
+        while (window.__fkcLocalTracks && window.__fkcLocalTracks[String(CUSTOM_BASE + n)]) n++;
+        try { localStorage.setItem(CUSTOM_SEQ, String(n + 1)); } catch (_) {}
+        return String(CUSTOM_BASE + n);
+    }
+
+    // Объект трека в том виде, в каком его отдаёт API
+    function customTrackDto(id) {
+        const rec = (window.__fkcLocalTracks || {})[String(id)];
+        if (!rec || !rec.custom) return null;
+        const al = (rec.albumId && albumMeta(rec.albumId)) || {};
+        const cover = al.coverUri || rec.albumCover || '';
+        const album = {
+            id: Number(rec.albumId) || 0,
+            title: al.title || rec.albumTitle || '',
+            type: 'album',
+            metaType: 'music',
+            coverUri: cover,
+            ogImage: cover,
+            artists: al.artists || rec.albumArtists || [],
+            labels: [],
+            available: true,
+            availableForPremiumUsers: true,
+            trackPosition: { volume: 1, index: 1 },
+        };
+        return {
+            id: Number(id),
+            realId: String(id),
+            title: rec.title || 'Без названия',
+            available: true,
+            availableForPremiumUsers: true,
+            availableFullWithoutPermission: true,
+            availableForOptions: [],
+            disclaimers: [],
+            storageDir: '',
+            durationMs: rec.durationMs || 0,
+            fileSize: 0,
+            artists: rec.artists || [],
+            albums: [album],
+            coverUri: cover,
+            ogImage: cover,
+            lyricsAvailable: false,
+            type: 'music',
+            rememberPosition: false,
+            trackSharingFlag: 'COVER_ONLY',
+            trackSource: 'OWN',
+        };
+    }
+
+    function splitCustomIds(list) {
+        const rest = [];
+        const custom = [];
+        for (const raw of list) {
+            const id = String(raw).split(':')[0];
+            if (isCustomId(id)) { if (!custom.includes(id)) custom.push(id); }
+            else rest.push(raw);
+        }
+        return { rest, custom };
+    }
+
+    // Ответ без сети: у Response нельзя задать url, поэтому ставим его свойством,
+    // чтобы ответ прошёл через подмену метаданных как настоящий
+    function fakeJsonResponse(url, body, status) {
+        const r = new Response(JSON.stringify(body), { status: status || 200, headers: { 'Content-Type': 'application/json' } });
+        Object.defineProperty(r, 'url', { value: url });
+        return r;
+    }
+
+    const hasCustomTracks = () => Object.values(window.__fkcLocalTracks || {}).some((t) => t && t.custom);
+    const ID_FIELDS = ['trackIds', 'track-ids'];
+
+    // Переписывает запрос к API, если в нём есть свои треки: id ищем в адресе (?track-ids=),
+    // в пути (/tracks/{id}) и в теле — строке, URLSearchParams или FormData (так шлёт клиент).
+    // Вернёт { input, init, custom, fake } — fake: готовый ответ без запроса к серверу
+    async function rewriteCustomRequest(url, input, init, headers) {
+        const out = { input, init, custom: [], fake: null };
+        let u;
+        try { u = new URL(url); } catch (_) { return out; }
+        const raw = headers.has('x-yandex-music-without-invocation-info');
+        const wrap = (v) => (raw ? v : { invocationInfo: {}, result: v });
+        const path = u.pathname.split('/').filter(Boolean);
+
+        // /tracks/{id} и /tracks/{id}/…
+        if (path[0] === 'tracks' && path[1] && isCustomId(path[1])) {
+            const id = path[1].split(':')[0];
+            if (path.length === 2) out.fake = fakeJsonResponse(url, wrap([customTrackDto(id)].filter(Boolean)));
+            else out.fake = fakeJsonResponse(url, { error: { name: 'not-found', message: 'F_ckCensor: свой трек' } }, 404);
+            return out;
+        }
+
+        // ?track-ids=…
+        const q = u.searchParams.get('track-ids');
+        if (q) {
+            const sp = splitCustomIds(q.split(','));
+            if (sp.custom.length) {
+                out.custom = sp.custom;
+                if (!sp.rest.length) { out.fake = fakeJsonResponse(url, wrap([])); return out; }
+                u.searchParams.set('track-ids', sp.rest.join(','));
+                out.input = input instanceof Request ? new Request(u.toString(), input) : u.toString();
+            }
+        }
+
+        // тело: id полями формы (каждый отдельно) или строкой через запятую
+        const isReq = input instanceof Request;
+        const method = ((init && init.method) || (isReq ? input.method : 'GET')).toUpperCase();
+        if (method === 'GET' || method === 'HEAD') return out;
+        let body = init && init.body;
+        if (!body && isReq) {
+            const ct = (input.headers.get('content-type') || '').toLowerCase();
+            if (!ct.includes('form')) return out;
+            try { body = await input.clone().formData(); } catch (_) { return out; }
+        }
+        if (!body) return out;
+        let form;
+        if (body instanceof FormData) form = body;
+        else if (typeof body === 'string' || body instanceof URLSearchParams) form = new URLSearchParams(body);
+        else return out;
+
+        let changed = false;
+        let left = 0;
+        const next = form instanceof FormData ? new FormData() : new URLSearchParams();
+        for (const [k, v] of form.entries()) {
+            if (!ID_FIELDS.includes(k) || typeof v !== 'string') { next.append(k, v); continue; }
+            const sp = splitCustomIds(v.split(','));
+            if (sp.custom.length) {
+                changed = true;
+                for (const id of sp.custom) if (!out.custom.includes(id)) out.custom.push(id);
+            }
+            if (sp.rest.length) { next.append(k, sp.rest.join(',')); left++; }
+        }
+        if (!changed) return out;
+        if (!left) { out.fake = fakeJsonResponse(url, wrap([])); return out; }
+        const newBody = typeof body === 'string' ? next.toString() : next;
+        if (isReq) {
+            // заголовок с прежней границей формы не подходит к новому телу — браузер поставит свой
+            const h = new Headers(input.headers);
+            h.delete('content-type');
+            out.input = new Request(out.input instanceof Request ? out.input.url : input.url, {
+                method, headers: h, body: newBody, credentials: input.credentials, mode: input.mode, signal: input.signal,
+            });
+        } else {
+            out.init = Object.assign({}, init, { body: newBody });
+            if (out.init.headers && newBody instanceof FormData) {
+                const h = new Headers(out.init.headers);
+                h.delete('content-type');
+                out.init.headers = h;
+            }
+        }
+        return out;
+    }
+
+    // Свои запросы к API идут с теми же заголовками, что и запросы клиента (вход пользователя,
+    // версия клиента): без входа API помечает треки недоступными. Заголовки берём из запросов
+    // самого клиента; токен уходит только в API Яндекс Музыки, как и у клиента.
+    const API_HEADERS = ['authorization', 'x-yandex-music-client', 'x-yandex-music-device', 'accept-language'];
+    if (!window.__fkcFetchPatched) {
+        window.__fkcFetchPatched = true;
+        const origFetch = window.fetch;
+        window.fetch = function(input, init) {
+            try {
+                const url = typeof input === 'string' ? input : input && input.url;
+                if (typeof url === 'string' && url.startsWith(API_PREFIX)) {
+                    const h = new Headers((input instanceof Request ? input.headers : null) || (init && init.headers) || {});
+                    if (h.has('authorization')) {
+                        const keep = {};
+                        for (const k of API_HEADERS) if (h.has(k)) keep[k] = h.get(k);
+                        window.__fkcApiHeaders = keep;
+                    }
+                    // свои треки — только если они вообще есть: разбор тела запроса не бесплатный
+                    if (window.__fkCensorEnabled === true && hasCustomTracks()) {
+                        const self = this;
+                        return (async () => {
+                            let r = { input, init, custom: [], fake: null };
+                            try { r = await rewriteCustomRequest(url, input, init, h); }
+                            catch (e) { console.error('[F_ckCensor] свой трек в запросе:', e && e.message); }
+                            if (r.fake) { r.fake.__fkcCustom = r.custom; return r.fake; }
+                            const resp = await origFetch.call(self, r.input, r.init);
+                            if (r.custom.length) resp.__fkcCustom = r.custom;
+                            return resp;
+                        })();
+                    }
+                }
+            } catch (e) { console.error('[F_ckCensor] запрос:', e && e.message); }
+            return origFetch.call(this, input, init);
+        };
+    }
+    function apiFetch(path, init) {
+        return fetch(API_PREFIX + path, Object.assign({}, init, { headers: Object.assign({}, window.__fkcApiHeaders || {}) }));
+    }
+
+    // API Яндекс Музыки отдаёт и удалённые треки; ответ тоже пройдёт через подмену
     async function fetchTracks(ids) {
         if (!ids.length) return [];
-        const r = await fetch(API_PREFIX + 'tracks?track-ids=' + ids.join(','));
+        const r = await apiFetch('tracks?track-ids=' + ids.join(','));
         return ((await r.json()).result) || [];
     }
 
     async function fetchAlbums(ids) {
         if (!ids.length) return [];
-        const r = await fetch(API_PREFIX + 'albums?album-ids=' + ids.join(','), { method: 'POST' });
+        const r = await apiFetch('albums?album-ids=' + ids.join(','), { method: 'POST' });
         return ((await r.json()).result) || [];
     }
 
     // Трек-лист альбома из списка (возвращает удалённые треки в альбом)
-    async function applyAlbumVolumes(albumId, data) {
-        const raw = getMeta().albums[albumId];
+    // richHint: что просил клиент (?richTracks=true/false); без подсказки — по содержимому ответа
+    async function applyAlbumVolumes(albumId, data, richHint) {
+        const raw = albumMeta(albumId);
         if (!raw || !Array.isArray(raw.volumes) || !data || typeof data !== 'object') return;
         const ids = raw.volumes.map((v) => v.map(idOf));
         const all = ids.flat();
-        const rich = (data.volumes || []).some((v) => v.some((x) => x && typeof x === 'object' && 'title' in x));
+        const rich = typeof richHint === 'boolean' ? richHint
+            : (data.volumes || []).some((v) => v.some((x) => x && typeof x === 'object' && 'title' in x));
         if (rich) {
             const have = new Map();
             (data.volumes || []).flat().forEach((t) => have.set(idOf(t), t));
@@ -457,28 +726,131 @@
         }
     }
 
-    async function insertArtistAlbums(artistId, data) {
+    // Место альбома в профиле исполнителя: число — позиция (как в FckCensor), без числа — по дате
+    // выхода, среди остальных релизов; null — не добавлять (такие в список вставок не попадают)
+    const albumDate = (a) => {
+        const d = a && (a.releaseDate || (a.year ? String(a.year) + '-01-01' : ''));
+        const t = d ? Date.parse(d) : NaN;
+        return isNaN(t) ? null : t;
+    };
+    // список отсортирован от новых к старым: ставим перед первым, который старше
+    function insertByDate(list, item, d, dateOf) {
+        let i = d == null ? -1 : list.findIndex((x) => { const xd = dateOf(x); return xd != null && xd < d; });
+        if (i < 0) i = list.length;
+        list.splice(i, 0, item);
+    }
+
+    // Все альбомы исполнителя приходят страницами по дате (?page=N&sort-by=year). Альбом «по дате»
+    // попадает на страницу, в чей промежуток дат он входит: от конца прошлой страницы до конца этой
+    const albumPages = {}; // artistId → { page, last } — дата последнего альбома прошлой страницы
+    async function insertArtistAlbums(artistId, data, url) {
         const list = Array.isArray(data) ? data : data && data.albums;
-        if (!Array.isArray(list) || (data.pager && data.pager.page > 0)) return;
-        const ins = insertionsFor(artistId, 'albums').filter((x) => !list.some((a) => idOf(a) === String(x.releaseId)));
+        if (!Array.isArray(list)) return;
+        const pager = data && !Array.isArray(data) ? data.pager : null;
+        const page = pager ? pager.page || 0 : 0;
+        const size = pager ? pager.perPage || list.length : list.length;
+        const isLast = !pager || list.length < size || (page + 1) * size >= (pager.total || 0);
+        const byYear = !url || url.includes('sort-by=year');
+        const seen = albumPages[artistId];
+        const prev = page === 0 ? Infinity : seen && seen.page === page - 1 ? seen.last : null;
+        const dates = list.map(albumDate).filter((x) => x != null);
+        const last = dates.length ? dates[dates.length - 1] : null;
+        albumPages[artistId] = { page, last };
+
+        const all = insertionsFor(artistId, 'albums').filter((x) => !list.some((a) => idOf(a) === String(x.releaseId)));
+        if (!all.length) return;
+        const fixed = page === 0 ? all.filter((x) => typeof x.index === 'number') : [];
+        const byDate = all.filter((x) => typeof x.index !== 'number');
+        const fetched = await fetchAlbums(fixed.concat(byDate).map((x) => String(x.releaseId)));
+        const get = (x) => fetched.find((f) => idOf(f) === String(x.releaseId) && !f.error);
+        for (const x of fixed) { const a = get(x); if (a) insertAt(list, a, x.index); }
+        for (const x of byDate) {
+            const a = get(x);
+            if (!a) continue;
+            const d = albumDate(a);
+            if (!byYear) { if (page === 0) list.push(a); continue; }
+            const fits = prev != null && (d == null ? isLast : d < prev && (last == null || d >= last || isLast));
+            if (fits) insertByDate(list, a, d, albumDate);
+        }
+        // в общем числе — все вставки, чтобы клиент правильно считал страницы
+        if (pager && typeof pager.total === 'number') pager.total += all.length;
+    }
+
+    // Блок «Популярные альбомы» в профиле исполнителя (/artists/{id}/blocks/artist-albums):
+    // { items: [{ type: 'album_item', data: { album: { id, title, cover: { uri } }, artists, releaseDate } }] }.
+    // Здесь альбомы урезанные, общий обход их не узнаёт — подменяем отдельно и добавляем свои
+    function albumItemSpoof(it) {
+        const al = it && it.data && it.data.album;
+        if (!al || al.id == null) return;
+        const sp = albumSpoof(idOf(al));
+        if (!sp) return;
+        if (sp.title) al.title = sp.title;
+        if (sp.coverUri) al.cover = Object.assign({}, al.cover, { uri: sp.coverUri });
+        if (Array.isArray(sp.artists) && sp.artists.length) it.data.artists = sp.artists;
+        if (sp.releaseDate) it.data.releaseDate = sp.releaseDate;
+    }
+
+    function albumItemFrom(a) {
+        const date = a.releaseDate || (a.year ? new Date(a.year, 0, 1, 12).toJSON() : undefined);
+        return {
+            type: 'album_item',
+            data: {
+                album: {
+                    id: a.id,
+                    title: a.title || '',
+                    cover: { uri: a.coverUri || (a.cover && a.cover.uri) || '' },
+                    contentRestrictions: { available: true, disclaimers: [] },
+                },
+                artists: (a.artists || []).map((ar) => ({ id: ar.id, name: ar.name, cover: ar.cover, various: !!ar.various })),
+                releaseDate: date,
+            },
+        };
+    }
+
+    async function artistAlbumBlock(artistId, data) {
+        const body = data && data.result && !Array.isArray(data.result) ? data.result : data;
+        const items = body && Array.isArray(body.items) ? body.items : null;
+        if (!items) return;
+        items.forEach(albumItemSpoof);
+        const has = (rid) => items.some((it) => it && it.data && it.data.album && idOf(it.data.album) === String(rid));
+        const ins = insertionsFor(artistId, 'albums').filter((x) => !has(x.releaseId));
         if (!ins.length) return;
+        // альбомы целиком — через тот же API: удалённые оживут из записи
         const fetched = await fetchAlbums(ins.map((x) => String(x.releaseId)));
-        let added = 0;
+        const itemDate = (it) => albumDate(it && it.data);
         for (const x of ins) {
             const a = fetched.find((f) => idOf(f) === String(x.releaseId));
-            if (a) { insertAt(list, a, x.index); added++; }
+            if (!a || a.error) continue;
+            if (typeof x.index === 'number') insertAt(items, albumItemFrom(a), x.index);
+            else insertByDate(items, albumItemFrom(a), albumDate(a), itemDate);
         }
-        if (data.pager && typeof data.pager.total === 'number') data.pager.total += added;
     }
 
     async function processApi(url, data) {
         const path = url.slice(API_PREFIX.length).split('?')[0].split('/').filter(Boolean);
         const [root, id, sub] = path;
-        if (root === 'albums' && isNum(id) && sub === 'with-tracks') await applyAlbumVolumes(id, data);
+        if (root === 'albums') {
+            // ответ бывает в обёртке { result } (свои запросы) и без неё (запросы клиента)
+            const body = data && data.result !== undefined && !Array.isArray(data) ? data.result : data;
+            // альбомы-заглушки «not-found» оживляем до остального: у них нет даже названия
+            if (isNum(id) && body && typeof body === 'object' && !Array.isArray(body) && body.error && body.id == null) body.id = Number(id);
+            for (const a of Array.isArray(body) ? body : [body]) {
+                if (a && typeof a === 'object' && a.id != null && a.error && albumMeta(idOf(a))) applyAlbum(a);
+            }
+            if (isNum(id) && sub === 'with-tracks') {
+                let richHint = null;
+                try {
+                    const q = new URL(url).searchParams.get('richTracks');
+                    if (q === 'true' || q === 'false') richHint = q === 'true';
+                } catch (_) {}
+                await applyAlbumVolumes(id, body, richHint);
+            }
+        }
         else if (root === 'artists' && isNum(id)) {
             if (sub === 'tracks') await insertArtistTracks(id, data);
             else if (sub === 'track-ids') insertArtistTrackIds(id, data);
-            else if (sub === 'direct-albums' || sub === 'safe-direct-albums') await insertArtistAlbums(id, data);
+            else if (sub === 'direct-albums' || sub === 'safe-direct-albums') await insertArtistAlbums(id, data, url);
+            else if (sub === 'blocks' && path[3] === 'artist-albums') await artistAlbumBlock(id, data);
         }
         walk(data, 0);
     }
@@ -488,16 +860,23 @@
         Response.prototype.json = async function() {
             const data = await origJson.call(this);
             if (window.__fkCensorEnabled === true && typeof this.url === 'string' && this.url.startsWith(API_PREFIX)) {
-                try { await processApi(this.url, data); }
-                catch (e) { console.error('[FkCensor] подмена метаданных:', e && e.message); }
+                try {
+                    // свои треки, вырезанные из запроса, добавляем в ответ
+                    if (this.__fkcCustom && this.__fkcCustom.length) {
+                        const list = Array.isArray(data) ? data : data && Array.isArray(data.result) ? data.result : null;
+                        if (list) for (const id of this.__fkcCustom) { const t = customTrackDto(id); if (t) list.push(t); }
+                    }
+                    await processApi(this.url, data);
+                }
+                catch (e) { console.error('[F_ckCensor] подмена метаданных:', e && e.message); }
             }
             return data;
         };
         Response.prototype.__fkcPatched = true;
-        console.log('[FkCensor] перехват ответов API включён');
+        console.log('[F_ckCensor] перехват ответов API включён');
     }
 
-    // ---- Значок FkCensor рядом с названием подменённого трека, альбома, исполнителя ----
+    // ---- Значок F_ckCensor рядом с названием подменённого трека, альбома, исполнителя ----
     const SVG_NS = 'http://www.w3.org/2000/svg';
     const XLINK_NS = 'http://www.w3.org/1999/xlink';
     const BADGE_ATTR = 'data-fkc-badge';
@@ -611,7 +990,7 @@
             if (badge) badge.remove();
             return;
         }
-        if (!badge) badge = makeBadge('Трек был подменён FkCensor');
+        if (!badge) badge = makeBadge('Трек был подменён F_ckCensor');
         // После названия и родных меток, но перед кнопкой меню в плеере
         const children = [...title.children].filter((c) => c !== badge);
         const options = children.slice(1).find((c) => c.tagName === 'DIV');
@@ -640,13 +1019,13 @@
         if (location.pathname.startsWith('/album')) {
             const albumId = params.get('albumId');
             document.querySelectorAll('[class*="CommonAlbumPage_header__"] [class*="PageHeaderTitle_stickyTitle__"]')
-                .forEach((t) => updateHeaderTitle(t, enabled && !!m.albums[albumId], 'Альбом был подменён FkCensor'));
+                .forEach((t) => updateHeaderTitle(t, enabled && !!albumMeta(albumId), 'Альбом был подменён F_ckCensor'));
         }
         if (location.pathname.startsWith('/artist')) {
             const artistId = params.get('artistId');
             const spoofed = enabled && (!!m.artists[artistId] || insertionsFor(artistId, 'tracks').length + insertionsFor(artistId, 'albums').length > 0);
             document.querySelectorAll('[class*="ArtistPage_header__"] [class*="PageHeaderTitle_stickyTitle__"]')
-                .forEach((t) => updateHeaderTitle(t, spoofed, 'Исполнитель был подменён FkCensor'));
+                .forEach((t) => updateHeaderTitle(t, spoofed, 'Исполнитель был подменён F_ckCensor'));
         }
     }
 
@@ -656,7 +1035,7 @@
         if (badgeTimer) return;
         badgeTimer = setTimeout(() => {
             badgeTimer = null;
-            try { refreshBadges(); } catch (e) { console.error('[FkCensor] значки:', e && e.message); }
+            try { refreshBadges(); } catch (e) { console.error('[F_ckCensor] значки:', e && e.message); }
         }, 300);
     }
     window.__fkcBadgesRefresh = scheduleBadges;
@@ -667,7 +1046,7 @@
             // Свои значки не перезапускают обход
             // Пункт «Подменить трек» нужен сразу, пока меню открыто
             if (mutations.some((mu) => mu.addedNodes.length)) {
-                try { injectTrackMenus(); } catch (e) { console.error('[FkCensor] меню:', e && e.message); }
+                try { injectTrackMenus(); injectAlbumMenus(); } catch (e) { console.error('[F_ckCensor] меню:', e && e.message); }
             }
             if (mutations.every((mu) => [...mu.addedNodes, ...mu.removedNodes].every((n) => n.nodeType === 1 && n.hasAttribute && n.hasAttribute(BADGE_ATTR)) && mu.type === 'childList')) return;
             scheduleBadges();
@@ -682,18 +1061,24 @@
 
     function idb() {
         return new Promise((resolve, reject) => {
-            const req = indexedDB.open(LOCAL_DB, 1);
-            req.onupgradeneeded = () => req.result.createObjectStore(LOCAL_STORE, { keyPath: 'id' });
+            const req = indexedDB.open(LOCAL_DB, 2);
+            req.onupgradeneeded = () => {
+                const db = req.result;
+                for (const name of [LOCAL_STORE, 'albums']) {
+                    if (!db.objectStoreNames.contains(name)) db.createObjectStore(name, { keyPath: 'id' });
+                }
+            };
             req.onsuccess = () => resolve(req.result);
             req.onerror = () => reject(req.error);
         });
     }
 
-    async function idbRun(mode, fn) {
+    async function idbRun(mode, fn, store) {
+        const name = store || LOCAL_STORE;
         const db = await idb();
         return new Promise((resolve, reject) => {
-            const tx = db.transaction(LOCAL_STORE, mode);
-            const req = fn(tx.objectStore(LOCAL_STORE));
+            const tx = db.transaction(name, mode);
+            const req = fn(tx.objectStore(name));
             tx.oncomplete = () => resolve(req && req.result);
             tx.onerror = () => reject(tx.error);
         });
@@ -709,15 +1094,26 @@
             fileName: rec.fileName || '',
             url: rec.file ? URL.createObjectURL(rec.file) : null,
         };
+        // свой трек, которого нет в Яндекс Музыке: из чего собрать его данные
+        if (rec.custom) {
+            Object.assign(localTracks[rec.id], {
+                custom: true,
+                artists: rec.artists || [],
+                albumId: rec.albumId || '',
+                albumTitle: rec.albumTitle || '',
+                albumArtists: rec.albumArtists || [],
+                albumCover: rec.albumCover || '',
+            });
+        }
     }
 
     async function loadLocalTracks() {
         try {
             const all = await idbRun('readonly', (st) => st.getAll());
             for (const rec of all || []) rememberLocal(rec);
-            if ((all || []).length) console.log('[FkCensor] своих подмен:', all.length);
+            if ((all || []).length) console.log('[F_ckCensor] своих подмен:', all.length);
             scheduleBadges();
-        } catch (e) { console.error('[FkCensor] своя подмена (загрузка):', e && e.message); }
+        } catch (e) { console.error('[F_ckCensor] своя подмена (загрузка):', e && e.message); }
     }
 
     async function saveLocalTrack(rec) {
@@ -774,13 +1170,27 @@
             btn.closest('[class*="FullscreenPlayer"]');
         if (!scope) scope = btn.parentElement && btn.parentElement.parentElement && btn.parentElement.parentElement.parentElement;
         const link = scope && scope.querySelector('a[href*="trackId="]');
-        if (!link) return null;
-        try { return new URL(link.getAttribute('href'), location.href).searchParams.get('trackId'); }
-        catch (_) { return null; }
+        if (link) {
+            try { return new URL(link.getAttribute('href'), location.href).searchParams.get('trackId'); } catch (_) {}
+        }
+        // Плеер «Моей волны» ссылок на трек не показывает — берём id из React
+        return trackIdFromFiber(btn);
+    }
+
+    // id трека из аналитического контекста React (props objectType: 'track', objectId),
+    // которым клиент оборачивает плееры. Имена свойств не минифицируются.
+    function trackIdFromFiber(el) {
+        const key = el && Object.keys(el).find((k) => k.startsWith('__reactFiber$'));
+        let f = key ? el[key] : null;
+        for (let i = 0; f && i < 60; i++, f = f.return) {
+            const p = f.memoizedProps;
+            if (p && p.objectType === 'track' && p.objectId != null) return String(p.objectId);
+        }
+        return null;
     }
 
     function injectTrackMenus() {
-        document.querySelectorAll('[data-test-id="TRACK_CONTEXT_MENU"]').forEach((menu) => {
+        document.querySelectorAll('[data-test-id="TRACK_CONTEXT_MENU"], [data-test-id="VIBE_CONTEXT_MENU"]').forEach((menu) => {
             if (menu.querySelector('[data-fkc-menuitem]')) return;
             const items = [...menu.querySelectorAll('[role="menuitem"]')];
             // У аддона FckCensor (PulseSync) такой пункт уже есть — второй не нужен
@@ -853,6 +1263,88 @@
         '.fkc-toast{position:fixed;left:50%;bottom:120px;transform:translateX(-50%);z-index:2147483001;padding:12px 18px;border-radius:14px;',
         'font-size:14px;background:var(--ym-background-color-primary-enabled-popover,#1a1a1a);color:var(--ym-controls-color-secondary-text-enabled_variant,#fff);',
         'box-shadow:0 1px 20px rgba(0,0,0,.48);max-width:480px;text-align:center}',
+        '.fkc-coverbtn{position:relative;padding:0;border:0;background:none;cursor:pointer;border-radius:14px;flex-shrink:0}',
+        '.fkc-coverhint{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;border-radius:14px;',
+        'font-size:14px;font-weight:600;color:#fff;background:rgba(0,0,0,.5);opacity:0;transition:opacity .15s}',
+        '.fkc-coverbtn:hover .fkc-coverhint{opacity:1}',
+        '.fkc-small{font-size:13px}',
+        '.fkc-artists{align-items:center;padding:10px 12px;gap:8px}',
+        '.fkc-artists-sm{padding:8px}',
+        '.fkc-chip-x{border:0;font:inherit;cursor:pointer;height:32px;box-sizing:border-box}',
+        '.fkc-chip-x:hover:not(:disabled){text-decoration:line-through}',
+        '.fkc-chip-x:disabled{cursor:default;opacity:.6}',
+        '.fkc-round{width:32px;height:32px;border:0;border-radius:50%;cursor:pointer;flex-shrink:0;display:flex;align-items:center;',
+        'justify-content:center;padding:0;background:var(--ym-controls-color-secondary-default-hovered,rgba(255,255,255,.12));',
+        'color:var(--ym-controls-color-secondary-on_default-enabled,#e6e6e6)}',
+        '.fkc-round:hover{background:var(--ym-controls-color-secondary-default-pressed,rgba(255,255,255,.2))}',
+        '.fkc-round svg{width:16px;height:16px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}',
+        '.fkc-swrow{display:flex;align-items:center;justify-content:space-between;gap:12px;font-size:16px;font-weight:600;cursor:pointer;',
+        'color:var(--ym-controls-color-secondary-text-enabled_variant,#fff);transition:color .15s}',
+        '.fkc-swrow input{display:none}',
+        '.fkc-swrow i{width:34px;height:20px;border-radius:10px;position:relative;flex-shrink:0;transition:background .15s;',
+        'background:var(--ym-controls-color-secondary-default-hovered,rgba(255,255,255,.2))}',
+        '.fkc-swrow i::after{content:"";position:absolute;left:3px;top:3px;width:14px;height:14px;border-radius:50%;',
+        'background:var(--ym-controls-color-secondary-text-enabled,rgba(255,255,255,.5));transition:transform .15s,background .15s}',
+        '.fkc-swrow input:checked+i{background:var(--ym-controls-color-primary-default-enabled,#ff0)}',
+        '.fkc-swrow input:checked+i::after{transform:translateX(14px);background:#000}',
+        '.fkc-swrow.fkc-off{cursor:default;color:var(--ym-controls-color-primary-text-disabled,rgba(255,255,255,.3))}',
+        '.fkc-swrow.fkc-off i{opacity:.5}',
+        '.fkc-panel{border-radius:12px;padding:8px;background:var(--ym-surface-color-primary-enabled-list,rgba(255,255,255,.08))}',
+        '.fkc-tracks{display:flex;flex-direction:column;max-height:320px;overflow:auto}',
+        '.fkc-trow{display:flex;align-items:center;gap:12px;padding:8px;border-radius:10px}',
+        '.fkc-trow:hover{background:var(--ym-controls-color-secondary-default-enabled,rgba(255,255,255,.05))}',
+        '.fkc-tcover{width:40px;height:40px;border-radius:6px;object-fit:cover;flex-shrink:0;background:rgba(255,255,255,.12)}',
+        '.fkc-idx{display:flex;flex-direction:column;flex-shrink:0}',
+        '.fkc-idx button{width:22px;height:16px;padding:0;border:0;background:none;cursor:pointer;',
+        'color:var(--ym-controls-color-primary-text-enabled,rgba(255,255,255,.5))}',
+        '.fkc-idx button:hover:not(:disabled){color:var(--ym-controls-color-secondary-on_default-enabled,#fff)}',
+        '.fkc-idx button:disabled{opacity:.3;cursor:default}',
+        '.fkc-idx svg{width:100%;height:100%}',
+        'svg.fkc-filled{fill:currentColor;stroke:none}',
+        '.fkc-disk{display:flex;align-items:center;justify-content:space-between;padding:10px 8px 4px;font-size:15px;font-weight:700;',
+        'color:var(--ym-controls-color-secondary-text-enabled_variant,#fff)}',
+        '.fkc-disk .fkc-round{width:26px;height:26px}',
+        '.fkc-addarea{padding:8px}',
+        '.fkc-addrow{display:flex;gap:16px}',
+        '.fkc-dashed{flex:1;height:44px;border-radius:8px;font:inherit;font-size:14px;font-weight:500;cursor:pointer;background:none;',
+        'border:2px dashed var(--ym-controls-color-primary-text-enabled,rgba(255,255,255,.5));',
+        'color:var(--ym-controls-color-primary-text-enabled,rgba(255,255,255,.5))}',
+        '.fkc-dashed:hover{color:var(--ym-controls-color-secondary-text-enabled_variant,#fff);border-color:currentColor}',
+        '.fkc-searchline{display:flex;align-items:center;gap:10px;margin-top:8px}',
+        '.fkc-searchline .fkc-search{flex:1}',
+        '.fkc-ownfile{display:flex;align-items:center;gap:8px;padding:0 16px}',
+        '.fkc-ownfile svg{width:16px;height:16px;fill:none;stroke:currentColor;stroke-width:1.5;stroke-linejoin:round}',
+        '.fkc-cform{display:flex;flex-direction:column;gap:14px;padding:12px;border-radius:10px;',
+        'background:var(--ym-controls-color-secondary-default-enabled,rgba(255,255,255,.05))}',
+        '.fkc-cfile{font-size:13px;color:var(--ym-controls-color-secondary-text-enabled,rgba(255,255,255,.5))}',
+        '.fkc-cbtns{justify-content:flex-end}',
+        '.fkc-search{position:relative}',
+        '.fkc-results[hidden],.fkc-search[hidden]{display:none}',
+        '.fkc-results{position:absolute;left:0;right:0;top:calc(100% + 6px);z-index:2;display:flex;flex-direction:column;padding:6px;',
+        'border-radius:12px;max-height:300px;overflow:auto;background:var(--ym-background-color-primary-enabled-popover,#1a1a1a);',
+        'box-shadow:0 1px 20px rgba(0,0,0,.48)}',
+        '.fkc-res{display:flex;align-items:center;gap:10px;padding:6px 8px;border:0;border-radius:8px;background:none;font:inherit;',
+        'text-align:left;cursor:pointer;color:var(--ym-controls-color-secondary-text-enabled_variant,#fff)}',
+        '.fkc-res:hover{background:var(--ym-controls-color-secondary-default-hovered,rgba(255,255,255,.12))}',
+        '.fkc-res img,.fkc-res i{width:36px;height:36px;border-radius:6px;object-fit:cover;flex-shrink:0;background:rgba(255,255,255,.12)}',
+        '.fkc-res-txt{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px}',
+        '.fkc-res-txt b,.fkc-res-txt span{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}',
+        '.fkc-res-txt b{font-size:15px;font-weight:500;color:var(--ym-controls-color-secondary-text-enabled_variant,#fff)}',
+        '.fkc-res-txt span{font-size:13px;color:var(--ym-controls-color-secondary-text-enabled,rgba(255,255,255,.5))}',
+        '.fkc-res-empty{padding:12px;font-size:13px;text-align:center;color:var(--ym-controls-color-secondary-text-enabled,rgba(255,255,255,.5))}',
+        '.fkc-details summary{display:flex;align-items:center;gap:8px;cursor:pointer;font-size:15px;font-weight:500;list-style:none;',
+        'color:var(--ym-controls-color-secondary-text-enabled,rgba(255,255,255,.6))}',
+        '.fkc-details summary::-webkit-details-marker{display:none}',
+        '.fkc-details summary::before{content:"";width:0;height:0;border-left:7px solid currentColor;border-top:5px solid transparent;',
+        'border-bottom:5px solid transparent;transition:transform .15s}',
+        '.fkc-details[open] summary::before{transform:rotate(90deg)}',
+        '.fkc-info{width:16px;height:16px;border-radius:50%;border:1.5px solid currentColor;display:inline-flex;align-items:center;',
+        'justify-content:center;font-size:11px;font-weight:700;font-style:normal;cursor:help;box-sizing:border-box}',
+        '.fkc-props{display:flex;flex-direction:column;gap:10px;margin-top:12px}',
+        '.fkc-prop{display:flex;gap:10px;align-items:center}',
+        '.fkc-prop .fkc-input:first-child{width:38%;flex-shrink:0}',
+        '.fkc-prop .fkc-round{align-self:center}',
+        '.fkc-dialog,.fkc-tracks,.fkc-results{scrollbar-width:thin;scrollbar-color:rgba(255,255,255,.2) transparent}',
     ].join('');
 
     function ensureDialogCss() {
@@ -954,7 +1446,13 @@
 
         const foot = el('div', 'fkc-foot');
         const report = el('button', 'fkc-btn fkc-primary', 'Сообщить о цензуре');
-        report.disabled = isReported(trackId) || hasAnySpoof(trackId);
+        // Неактивная кнопка сама объясняет почему
+        function renderReport() {
+            if (isReported(trackId)) { report.disabled = true; report.textContent = 'Уже отправлено'; }
+            else if (hasAnySpoof(trackId)) { report.disabled = true; report.textContent = 'Уже подменяется'; }
+            else { report.disabled = false; report.textContent = 'Сообщить о цензуре'; }
+        }
+        renderReport();
         const right = el('div', 'fkc-foot-right');
         const del = el('button', 'fkc-btn fkc-secondary', 'Удалить подмену');
         const apply = el('button', 'fkc-btn fkc-primary', 'Применить');
@@ -966,8 +1464,8 @@
 
         report.addEventListener('click', async () => {
             report.disabled = true;
-            const ok = await reportCensor(trackId, false, reportInfo());
-            report.disabled = ok || isReported(trackId);
+            await reportCensor(trackId, false, reportInfo());
+            renderReport();
         });
 
         const hasRemote = !!((window.__fkCensorReplacements || {})[trackId]);
@@ -985,7 +1483,7 @@
                 status.appendChild(el('b', null, saved.fileName || 'аудио'));
                 if (saved.durationMs) status.appendChild(document.createTextNode(' · ' + fmtTime(saved.durationMs)));
             } else if (hasRemote) {
-                status.textContent = 'Подменяется из базы FckCensorData.';
+                status.textContent = 'Подменяется из базы замен.';
             } else {
                 status.textContent = 'Аудио не подменяется.';
             }
@@ -1053,13 +1551,746 @@
         setTimeout(() => input.focus(), 0);
     }
 
+    // ---- Своя подмена альбома: пункт «Подменить альбом», окно подмены, хранение в IndexedDB ----
+    // Как в аддоне FckCensor: название, обложка из файла, исполнители, трек-лист
+    // (добавить поиском или по ссылке, убрать, переставить) и «Подменить исполнителей для треков».
+    const localAlbums = window.__fkcLocalAlbums = window.__fkcLocalAlbums || {};
+    const LOCAL_ALBUMS = 'albums';
+
+    // Подмена альбома: своя пользователя поверх подмены из базы
+    function albumMeta(id) {
+        const base = getMeta().albums[id];
+        const local = window.__fkCensorEnabled === true ? localAlbums[id] : null;
+        if (!local) return base || null;
+        const out = Object.assign({}, base || {}, local);
+        if ((base && base.__fckCensor) || local.__fckCensor) out.__fckCensor = Object.assign({}, base && base.__fckCensor, local.__fckCensor);
+        return out;
+    }
+
+    function rememberLocalAlbum(rec) {
+        const old = localAlbums[rec.id];
+        if (old && typeof old.coverUri === 'string' && old.coverUri.startsWith('blob:')) URL.revokeObjectURL(old.coverUri);
+        // дополнительные поля — первыми: явные поля окна подмены важнее
+        const a = Object.assign({}, rec.extra || {});
+        if (rec.title) a.title = rec.title;
+        // обложка из файла: клиент принимает адрес blob: как есть, без шаблона размера
+        if (rec.cover) a.coverUri = URL.createObjectURL(rec.cover);
+        if (Array.isArray(rec.artists) && rec.artists.length) a.artists = rec.artists;
+        if (Array.isArray(rec.volumes)) a.volumes = rec.volumes.map((v) => v.map((id) => ({ id: isNum(String(id)) ? Number(id) : id })));
+        if (rec.replaceArtists) a.__fckCensor = { replaceArtistsInAlbumVolumes: true };
+        localAlbums[rec.id] = a;
+    }
+
+    async function loadLocalAlbums() {
+        try {
+            const all = await idbRun('readonly', (st) => st.getAll(), LOCAL_ALBUMS);
+            for (const rec of all || []) rememberLocalAlbum(rec);
+            if ((all || []).length) console.log('[F_ckCensor] своих подмен альбомов:', all.length);
+            scheduleBadges();
+        } catch (e) { console.error('[F_ckCensor] своя подмена альбома (загрузка):', e && e.message); }
+    }
+
+    async function saveLocalAlbum(rec) {
+        await idbRun('readwrite', (st) => st.put(rec), LOCAL_ALBUMS);
+        rememberLocalAlbum(rec);
+        scheduleBadges();
+    }
+
+    async function removeLocalAlbum(id) {
+        await idbRun('readwrite', (st) => st.delete(id), LOCAL_ALBUMS);
+        const old = localAlbums[id];
+        if (old && typeof old.coverUri === 'string' && old.coverUri.startsWith('blob:')) URL.revokeObjectURL(old.coverUri);
+        delete localAlbums[id];
+        scheduleBadges();
+    }
+
+    // id альбома у кнопки меню: на странице альбома и в карточках — из свойств React
+    function albumIdFromFiber(el) {
+        const key = el && Object.keys(el).find((k) => k.startsWith('__reactFiber$'));
+        let f = key ? el[key] : null;
+        for (let i = 0; f && i < 60; i++, f = f.return) {
+            const p = f.memoizedProps;
+            if (!p) continue;
+            if (p.album && p.album.id != null) return String(p.album.id);
+            if (p.albumId != null) return String(p.albumId);
+            if (p.objectType === 'album' && p.objectId != null) return String(p.objectId);
+        }
+        return null;
+    }
+
+    function albumIdForMenu(menu) {
+        const holder = menu.closest('[aria-labelledby]');
+        const btn = holder && document.getElementById(holder.getAttribute('aria-labelledby'));
+        if (!btn) return null;
+        const scope = btn.closest('[class*="AlbumCard"]') || btn.parentElement;
+        const link = scope && scope.querySelector('a[href*="albumId="]');
+        if (link) {
+            try { return new URL(link.getAttribute('href'), location.href).searchParams.get('albumId'); } catch (_) {}
+        }
+        const fromFiber = albumIdFromFiber(btn);
+        if (fromFiber) return fromFiber;
+        if (location.pathname.startsWith('/album')) return new URLSearchParams(location.search).get('albumId');
+        return null;
+    }
+
+    // Пункт меню «Подменить …» по образцу первого родного пункта
+    function makeMenuItem(items, text, onClick) {
+        const item = items[0].cloneNode(true);
+        item.removeAttribute('data-test-id');
+        item.setAttribute('data-fkc-menuitem', '');
+        const label = item.querySelector('span') || item;
+        const icon = label.querySelector('svg');
+        while (label.firstChild) label.removeChild(label.firstChild);
+        if (icon) {
+            const use = icon.querySelector('use');
+            if (use) { use.setAttributeNS(XLINK_NS, 'xlink:href', BADGE_ICON); use.setAttribute('href', BADGE_ICON); }
+            label.appendChild(icon);
+        }
+        label.appendChild(document.createTextNode(text));
+        item.addEventListener('click', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', bubbles: true }));
+            onClick();
+        }, true);
+        return item;
+    }
+
+    function injectAlbumMenus() {
+        document.querySelectorAll('[data-test-id="ALBUM_CONTEXT_MENU"]').forEach((menu) => {
+            if (menu.querySelector('[data-fkc-menuitem]')) return;
+            const items = [...menu.querySelectorAll('[role="menuitem"], [role="menuitemcheckbox"]')];
+            // У аддона FckCensor (PulseSync) такой пункт уже есть — второй не нужен
+            if (!items.length || items.some((i) => i.textContent.trim() === 'Подменить альбом')) return;
+            const albumId = albumIdForMenu(menu);
+            if (!albumId || !isNum(albumId)) return;
+            const item = makeMenuItem(items, 'Подменить альбом', () => openAlbumDialog(albumId));
+            const last = items[items.length - 1];
+            last.parentElement.insertBefore(item, last);
+        });
+    }
+
+    // После изменения открытая страница альбома показывает старые данные: уходим на поиск
+    // и возвращаемся — клиент заново запрашивает альбом, и подмена применяется
+    function reopenAlbumPage(albumId) {
+        if (!location.pathname.startsWith('/album') || new URLSearchParams(location.search).get('albumId') !== String(albumId)) return;
+        const away = document.querySelector('a[href^="/search"]');
+        if (!away) return;
+        away.click();
+        setTimeout(() => history.back(), 400);
+    }
+
+    async function searchApi(text, type) {
+        const r = await apiFetch('search?text=' + encodeURIComponent(text) + '&type=' + type + '&page=0');
+        const j = await r.json();
+        const block = (j.result || {})[type + 's'];
+        return (block && block.results) || [];
+    }
+
+    // id трека из ссылки: …?trackId=123, …/track/123 или просто число
+    function trackIdFromText(text) {
+        const s = text.trim();
+        if (isNum(s)) return s;
+        try {
+            const u = new URL(s, location.href);
+            const q = u.searchParams.get('trackId');
+            if (q && isNum(q)) return q;
+            const parts = u.pathname.split('/').filter(Boolean);
+            const i = parts.lastIndexOf('track');
+            if (i >= 0 && isNum(parts[i + 1] || '')) return parts[i + 1];
+        } catch (_) {}
+        return null;
+    }
+
+    const artistNames = (list) => (list || []).map((a) => a && a.name).filter(Boolean).join(', ');
+    const sameIds = (a, b) => a.length === b.length && a.every((x, i) => String(x) === String(b[i]));
+
+    // Поле поиска с выпадающим списком: search(text) → [{ label, sub, cover, value }], pick(value)
+    function searchBox(placeholder, search, pick) {
+        const wrap = el('div', 'fkc-search');
+        const input = el('input', 'fkc-input');
+        input.placeholder = placeholder;
+        const list = el('div', 'fkc-results');
+        list.hidden = true;
+        wrap.appendChild(input);
+        wrap.appendChild(list);
+        let timer = null;
+        let seq = 0;
+        input.addEventListener('input', () => {
+            clearTimeout(timer);
+            const text = input.value.trim();
+            if (!text) { list.hidden = true; return; }
+            timer = setTimeout(async () => {
+                const my = ++seq;
+                let rows = [];
+                try { rows = await search(text); } catch (_) {}
+                if (my !== seq) return;
+                list.textContent = '';
+                if (!rows.length) list.appendChild(el('div', 'fkc-res-empty', 'Ничего не найдено'));
+                for (const row of rows.slice(0, 6)) {
+                    const r = el('button', 'fkc-res');
+                    r.type = 'button';
+                    const img = row.cover ? el('img') : el('i');
+                    if (row.cover) img.src = row.cover;
+                    r.appendChild(img);
+                    const txt = el('div', 'fkc-res-txt');
+                    txt.appendChild(el('b', null, row.label));
+                    if (row.sub) txt.appendChild(el('span', null, row.sub));
+                    r.appendChild(txt);
+                    // mousedown, а не click: иначе поле теряет фокус раньше и список закрывается
+                    r.addEventListener('mousedown', (e) => { e.preventDefault(); pick(row.value); input.value = ''; list.hidden = true; });
+                    list.appendChild(r);
+                }
+                list.hidden = false;
+            }, 300);
+        });
+        input.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !list.hidden) { e.stopPropagation(); list.hidden = true; } });
+        return { wrap, input, list };
+    }
+
+    // Маленькие иконки рисуем сами: символы стрелок шрифт клиента показывает цветными эмодзи
+    const ICONS = {
+        up: 'M8 4.5l4.5 6h-9z',
+        down: 'M8 11.5l4.5-6h-9z',
+        close: 'M4.5 4.5l7 7M11.5 4.5l-7 7',
+        plus: 'M8 3.5v9M3.5 8h9',
+        file: 'M9 2.5H4.5v11h7V5zM9 2.5V5h2.5',
+    };
+    function svgIcon(name, filled) {
+        const svg = document.createElementNS(SVG_NS, 'svg');
+        svg.setAttribute('viewBox', '0 0 16 16');
+        const path = document.createElementNS(SVG_NS, 'path');
+        path.setAttribute('d', ICONS[name]);
+        svg.appendChild(path);
+        if (filled) svg.setAttribute('class', 'fkc-filled');
+        return svg;
+    }
+    function roundBtn(name, title, onClick) {
+        const b = el('button', 'fkc-round');
+        b.type = 'button';
+        b.title = title;
+        b.appendChild(svgIcon(name));
+        b.addEventListener('click', onClick);
+        return b;
+    }
+    function chip(a, onClick) {
+        const c = el('button', 'fkc-chip fkc-chip-x');
+        c.type = 'button';
+        c.title = 'Убрать';
+        const avatar = a.cover && a.cover.uri ? el('img') : el('i');
+        if (a.cover && a.cover.uri) avatar.src = coverUrl(a.cover.uri, '50x50');
+        c.appendChild(avatar);
+        c.appendChild(document.createTextNode(a.name || ''));
+        c.addEventListener('click', onClick);
+        return c;
+    }
+    const artistSearchRows = async (text) => (await searchApi(text, 'artist')).map((a) => ({
+        label: a.name, cover: a.cover && a.cover.uri ? coverUrl(a.cover.uri, '50x50') : '', value: a,
+    }));
+    // только нужные клиенту поля исполнителя
+    const slimArtist = (a) => ({
+        id: a.id, name: a.name, various: !!a.various, composer: !!a.composer,
+        available: a.available !== false, cover: a.cover, genres: a.genres || [], disclaimers: a.disclaimers || [],
+    });
+    function uniqArtists(list) {
+        const seen = new Set();
+        return list.filter((a) => a && !seen.has(String(a.id)) && seen.add(String(a.id)));
+    }
+
+    // Журнал своих треков: какие треки пользователи добавили в альбомы (только в свою очередь F_ckCensor)
+    async function logAddedTracks(albumId, albumTitle, albumArtists, tracks) {
+        if (!OWN_REPORT_URL || !OWN_REPORT_KEY || !tracks.length) return;
+        const cut = (s) => String(s || '').slice(0, 300) || null;
+        const rows = tracks.map((t) => ({
+            album_id: Number(albumId),
+            album_title: cut(albumTitle),
+            album_artists: cut(albumArtists),
+            track_title: cut(t.title) || 'без названия',
+            track_artists: cut(t.artists),
+            client_id: clientId(),
+        }));
+        try {
+            const r = await fetch(OWN_REPORT_URL.replace(/[/]+$/, '') + '/rest/v1/added_tracks', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', apikey: OWN_REPORT_KEY, Authorization: 'Bearer ' + OWN_REPORT_KEY, Prefer: 'return=minimal' },
+                body: JSON.stringify(rows),
+            });
+            if (!r.ok) console.error('[F_ckCensor] журнал своих треков: HTTP', r.status);
+        } catch (e) { console.error('[F_ckCensor] журнал своих треков:', e && e.message); }
+    }
+
+    async function openAlbumDialog(albumId) {
+        ensureDialogCss();
+        const existing = document.querySelector('.fkc-overlay');
+        if (existing) existing.remove();
+
+        // Альбом таким, каким его видит пользователь: с подменой из базы и своей
+        let album = null;
+        try {
+            const j = await (await apiFetch('albums/' + albumId + '/with-tracks')).json();
+            album = j.result || j;
+            await applyAlbumVolumes(albumId, album);
+        } catch (_) {}
+        if (!album || !album.id) { showToast('Не удалось загрузить альбом.'); return; }
+        let saved = null;
+        try { saved = await idbRun('readonly', (st) => st.get(albumId), LOCAL_ALBUMS); } catch (_) {}
+
+        const shownTitle = album.title || '';
+        const shownArtists = (album.artists || []).filter((a) => a && a.id != null);
+        const coverSrc = album.coverUri || (album.cover && album.cover.uri) || album.ogImage || '';
+        let artists = shownArtists.slice();
+        // диски: [[{ id, t, isNew }]]; isNew — свой трек, ещё не сохранённый
+        let volumes = (album.volumes || []).map((v) => v.map((t) => ({ id: idOf(t), t })));
+        if (!volumes.length) volumes = [[]];
+        const shownVol = JSON.stringify(volumes.map((v) => v.map((r) => r.id)));
+        const shownCustom = volumes.flat().map((r) => r.id).filter(isCustomId);
+        let pickedCover = null;
+        const fc = (albumMeta(albumId) || {}).__fckCensor || {};
+
+        const overlay = el('div', 'fkc-overlay');
+        const dlg = el('div', 'fkc-dialog');
+        overlay.appendChild(dlg);
+
+        const head = el('div', 'fkc-head');
+        head.appendChild(el('h2', 'fkc-h', 'Подмена альбома'));
+        const close = el('button', 'fkc-x');
+        close.setAttribute('aria-label', 'Закрыть');
+        close.appendChild(spriteIcon('close_xs'));
+        head.appendChild(close);
+        dlg.appendChild(head);
+
+        // обложка (нажатие — выбрать картинку) и название
+        const top = el('div', 'fkc-top');
+        const coverBtn = el('button', 'fkc-coverbtn');
+        coverBtn.type = 'button';
+        coverBtn.title = 'Выбрать обложку';
+        const cover = el('img', 'fkc-cover');
+        if (coverSrc) cover.src = coverUrl(coverSrc, '400x400');
+        coverBtn.appendChild(cover);
+        coverBtn.appendChild(el('span', 'fkc-coverhint', 'Изменить'));
+        const coverInput = el('input');
+        coverInput.type = 'file';
+        coverInput.accept = 'image/png,image/jpeg,image/webp';
+        coverInput.style.display = 'none';
+        top.appendChild(coverBtn);
+        top.appendChild(coverInput);
+        const field = el('div', 'fkc-field');
+        field.appendChild(el('div', 'fkc-label', 'Название'));
+        const input = el('input', 'fkc-input');
+        input.value = shownTitle;
+        input.placeholder = 'Название альбома';
+        field.appendChild(input);
+        top.appendChild(field);
+        dlg.appendChild(top);
+        coverBtn.addEventListener('click', () => coverInput.click());
+        coverInput.addEventListener('change', () => {
+            const f = coverInput.files && coverInput.files[0];
+            if (!f) return;
+            pickedCover = f;
+            const old = cover.src;
+            cover.src = URL.createObjectURL(f);
+            if (old && old.startsWith('blob:')) URL.revokeObjectURL(old);
+        });
+
+        // исполнители: нажатие убирает, «+» — поиск
+        const artistsField = el('div', 'fkc-field');
+        artistsField.appendChild(el('div', 'fkc-label', 'Исполнители'));
+        const chips = el('div', 'fkc-artists');
+        artistsField.appendChild(chips);
+        const artistSearch = searchBox('Найти исполнителя', artistSearchRows, (a) => {
+            if (!artists.some((x) => String(x.id) === String(a.id))) artists.push(a);
+            artistSearch.wrap.hidden = true;
+            renderArtists();
+        });
+        artistSearch.wrap.hidden = true;
+        artistSearch.input.addEventListener('blur', () => { setTimeout(() => { artistSearch.wrap.hidden = true; }, 150); });
+        artistsField.appendChild(artistSearch.wrap);
+        dlg.appendChild(artistsField);
+
+        const sw = el('label', 'fkc-swrow');
+        sw.appendChild(el('span', null, 'Подменить исполнителей для треков'));
+        const swInput = el('input');
+        swInput.type = 'checkbox';
+        swInput.checked = !!fc.replaceArtistsInAlbumVolumes;
+        sw.appendChild(swInput);
+        sw.appendChild(el('i'));
+        dlg.appendChild(sw);
+
+        const artistsChanged = () => !sameIds(artists.map((a) => a.id), shownArtists.map((a) => a.id));
+        function renderArtists() {
+            chips.textContent = '';
+            for (const a of artists) chips.appendChild(chip(a, () => { artists = artists.filter((x) => x !== a); renderArtists(); }));
+            chips.appendChild(roundBtn('plus', 'Добавить исполнителя', () => { artistSearch.wrap.hidden = false; artistSearch.input.focus(); }));
+            // переключатель имеет смысл, только если исполнители альбома подменены
+            const can = artistsChanged() || !!fc.replaceArtistsInAlbumVolumes;
+            swInput.disabled = !can;
+            sw.classList.toggle('fkc-off', !can);
+        }
+        renderArtists();
+
+        // треки альбома
+        const tracksField = el('div', 'fkc-field');
+        tracksField.appendChild(el('div', 'fkc-label', 'Треки альбома'));
+        const panel = el('div', 'fkc-panel');
+        const list = el('div', 'fkc-tracks');
+        const addArea = el('div', 'fkc-addarea');
+        panel.appendChild(list);
+        panel.appendChild(addArea);
+        tracksField.appendChild(panel);
+        dlg.appendChild(tracksField);
+
+        const lastDisk = () => volumes[volumes.length - 1];
+        const coverOf = (t) => (t && (t.coverUri || (t.albums && t.albums[0] && t.albums[0].coverUri))) || coverSrc;
+
+        // перемещение как в FckCensor: на краю диска трек переходит в соседний
+        function moveTrack(d, i, delta) {
+            const disk = volumes[d];
+            const [r] = disk.splice(i, 1);
+            const j = i + delta;
+            if (j >= 0 && j <= disk.length) disk.splice(j, 0, r);
+            else if (j < 0 && volumes[d - 1]) volumes[d - 1].push(r);
+            else if (j > disk.length && volumes[d + 1]) volumes[d + 1].unshift(r);
+            else disk.splice(i, 0, r);
+            renderTracks();
+        }
+
+        function trackRow(r, d, i, first, last) {
+            const row = el('div', 'fkc-trow');
+            const img = el('img', 'fkc-tcover');
+            const c = coverOf(r.t);
+            if (c) img.src = c.startsWith('blob:') ? c : coverUrl(c, '100x100');
+            row.appendChild(img);
+            const txt = el('div', 'fkc-res-txt');
+            txt.appendChild(el('b', null, (r.t && r.t.title) || ('трек ' + r.id)));
+            const sub = artistNames(r.t && r.t.artists);
+            txt.appendChild(el('span', null, (r.isNew || isCustomId(r.id) ? 'свой файл · ' : '') + sub));
+            row.appendChild(txt);
+            const idx = el('div', 'fkc-idx');
+            const up = el('button');
+            up.type = 'button';
+            up.title = 'Выше';
+            up.disabled = first;
+            up.appendChild(svgIcon('up', true));
+            up.addEventListener('click', () => moveTrack(d, i, -1));
+            const down = el('button');
+            down.type = 'button';
+            down.title = 'Ниже';
+            down.disabled = last;
+            down.appendChild(svgIcon('down', true));
+            down.addEventListener('click', () => moveTrack(d, i, 1));
+            idx.appendChild(up);
+            idx.appendChild(down);
+            row.appendChild(idx);
+            row.appendChild(roundBtn('close', 'Убрать из альбома', () => { volumes[d].splice(i, 1); renderTracks(); }));
+            return row;
+        }
+
+        function renderTracks() {
+            list.textContent = '';
+            const total = volumes.reduce((n, v) => n + v.length, 0);
+            let seen = 0;
+            volumes.forEach((disk, d) => {
+                if (volumes.length > 1) {
+                    const h = el('div', 'fkc-disk', 'Диск ' + (d + 1));
+                    if (!disk.length) {
+                        h.appendChild(roundBtn('close', 'Убрать пустой диск', () => { volumes.splice(d, 1); renderTracks(); }));
+                    }
+                    list.appendChild(h);
+                }
+                disk.forEach((r, i) => {
+                    list.appendChild(trackRow(r, d, i, seen === 0, seen === total - 1));
+                    seen++;
+                });
+                if (!disk.length) list.appendChild(el('div', 'fkc-res-empty', volumes.length > 1 ? 'Пустой диск' : 'В альбоме нет треков'));
+            });
+        }
+        renderTracks();
+
+        // добавление трека: кнопки → поиск или свой файл → форма своего трека
+        let mode = 'buttons';
+        let pending = null; // { file, durationMs, codec } — выбранный свой файл
+        const audioInput = el('input');
+        audioInput.type = 'file';
+        audioInput.accept = 'audio/*,.mp3,.flac,.m4a,.aac,.ogg,.wav';
+        audioInput.style.display = 'none';
+        panel.appendChild(audioInput);
+
+        function dashed(text, onClick) {
+            const b = el('button', 'fkc-dashed', text);
+            b.type = 'button';
+            b.addEventListener('click', onClick);
+            return b;
+        }
+
+        function renderAdd() {
+            addArea.textContent = '';
+            if (mode === 'buttons') {
+                const row = el('div', 'fkc-addrow');
+                row.appendChild(dashed('Добавить трек', () => { mode = 'search'; renderAdd(); }));
+                row.appendChild(dashed('Добавить диск', () => { volumes.push([]); renderTracks(); }));
+                addArea.appendChild(row);
+                return;
+            }
+            if (mode === 'search') {
+                addArea.appendChild(el('div', 'fkc-label fkc-small', 'Поиск по тексту / Ссылка на трек'));
+                const line = el('div', 'fkc-searchline');
+                const search = searchBox('Поиск...',
+                    async (text) => {
+                        const id = trackIdFromText(text);
+                        const found = id ? await fetchTracks([id]) : await searchApi(text, 'track');
+                        return found.map((t) => ({
+                            label: t.title + (t.version ? ' (' + t.version + ')' : ''),
+                            sub: artistNames(t.artists) + (t.durationMs ? ' · ' + fmtTime(t.durationMs) : '') +
+                                (t.available === false ? ' · недоступен' : ''),
+                            cover: t.coverUri ? coverUrl(t.coverUri, '50x50') : '',
+                            value: t,
+                        }));
+                    },
+                    (t) => {
+                        const id = idOf(t);
+                        if (volumes.flat().some((r) => r.id === id)) { showToast('Этот трек уже есть в альбоме.'); return; }
+                        lastDisk().push({ id, t });
+                        mode = 'buttons';
+                        renderTracks();
+                        renderAdd();
+                    });
+                line.appendChild(search.wrap);
+                const own = el('button', 'fkc-btn fkc-secondary fkc-ownfile');
+                own.type = 'button';
+                own.appendChild(svgIcon('file'));
+                own.appendChild(document.createTextNode('Свой файл'));
+                own.addEventListener('mousedown', (e) => e.preventDefault());
+                own.addEventListener('click', () => audioInput.click());
+                line.appendChild(own);
+                line.appendChild(roundBtn('close', 'Отмена', () => { mode = 'buttons'; renderAdd(); }));
+                addArea.appendChild(line);
+                setTimeout(() => search.input.focus(), 0);
+                return;
+            }
+            // форма своего трека
+            const form = el('div', 'fkc-cform');
+            form.appendChild(el('div', 'fkc-cfile', 'Файл: ' + pending.file.name + (pending.durationMs ? ' · ' + fmtTime(pending.durationMs) : '')));
+            const f1 = el('div', 'fkc-field');
+            f1.appendChild(el('div', 'fkc-label fkc-small', 'Название трека'));
+            const tIn = el('input', 'fkc-input');
+            tIn.value = pending.file.name.split('.').slice(0, -1).join('.') || pending.file.name;
+            tIn.placeholder = 'Название трека';
+            f1.appendChild(tIn);
+            form.appendChild(f1);
+            const f2 = el('div', 'fkc-field');
+            f2.appendChild(el('div', 'fkc-label fkc-small', 'Дополнительный исполнитель (необязательно)'));
+            const extraChips = el('div', 'fkc-artists fkc-artists-sm');
+            const extra = [];
+            const extraSearch = searchBox('Найти исполнителя', artistSearchRows, (a) => {
+                if (!extra.some((x) => String(x.id) === String(a.id)) && !artists.some((x) => String(x.id) === String(a.id))) extra.push(a);
+                extraSearch.wrap.hidden = true;
+                renderExtra();
+            });
+            extraSearch.wrap.hidden = true;
+            function renderExtra() {
+                extraChips.textContent = '';
+                for (const a of artists) {
+                    const c = chip(a, () => {});
+                    c.disabled = true;
+                    c.title = 'Исполнитель альбома';
+                    extraChips.appendChild(c);
+                }
+                for (const a of extra) extraChips.appendChild(chip(a, () => { extra.splice(extra.indexOf(a), 1); renderExtra(); }));
+                extraChips.appendChild(roundBtn('plus', 'Добавить исполнителя', () => { extraSearch.wrap.hidden = false; extraSearch.input.focus(); }));
+            }
+            renderExtra();
+            f2.appendChild(extraChips);
+            f2.appendChild(extraSearch.wrap);
+            form.appendChild(f2);
+            const btns = el('div', 'fkc-foot-right fkc-cbtns');
+            const cancel = el('button', 'fkc-btn fkc-secondary', 'Отмена');
+            const add = el('button', 'fkc-btn fkc-primary', 'Добавить в альбом');
+            cancel.type = add.type = 'button';
+            cancel.addEventListener('click', () => { pending = null; mode = 'buttons'; renderAdd(); });
+            add.addEventListener('click', () => {
+                const title = tIn.value.trim();
+                if (!title) { tIn.focus(); return; }
+                const id = allocCustomId();
+                lastDisk().push({
+                    id,
+                    t: { title, artists: artists.concat(extra), coverUri: coverSrc },
+                    isNew: { title, extra: extra.slice(), file: pending.file, durationMs: pending.durationMs, codec: pending.codec },
+                });
+                pending = null;
+                mode = 'buttons';
+                renderTracks();
+                renderAdd();
+            });
+            btns.appendChild(cancel);
+            btns.appendChild(add);
+            form.appendChild(btns);
+            addArea.appendChild(form);
+            setTimeout(() => tIn.select(), 0);
+        }
+        audioInput.addEventListener('change', async () => {
+            const f = audioInput.files && audioInput.files[0];
+            audioInput.value = '';
+            if (!f) return;
+            const durationMs = await audioDuration(f);
+            if (durationMs < 0) { showToast('Файл не похож на аудио.'); return; }
+            pending = { file: f, durationMs, codec: codecOfFile(f) };
+            mode = 'custom';
+            renderAdd();
+        });
+        renderAdd();
+
+        // дополнительные поля: любые свойства альбома в формате API (как в FckCensor)
+        const details = el('details', 'fkc-details');
+        const summary = el('summary', null, 'Дополнительные поля (продвинуто)');
+        const info = el('span', 'fkc-info', 'i');
+        info.title = 'Любые свойства альбома в формате API Яндекс Музыки: имя поля и значение. ' +
+            'Значение можно писать как JSON (число, true, список) — иначе это строка. Например: year → 2024.';
+        summary.appendChild(info);
+        details.appendChild(summary);
+        const props = el('div', 'fkc-props');
+        details.appendChild(props);
+        const extraRows = [];
+        function addProp(k, v) {
+            const row = el('div', 'fkc-prop');
+            const kIn = el('input', 'fkc-input');
+            kIn.placeholder = 'поле';
+            kIn.value = k || '';
+            const vIn = el('input', 'fkc-input');
+            vIn.placeholder = 'значение';
+            vIn.value = v === undefined ? '' : typeof v === 'string' ? v : JSON.stringify(v);
+            const entry = { kIn, vIn };
+            row.appendChild(kIn);
+            row.appendChild(vIn);
+            row.appendChild(roundBtn('close', 'Убрать поле', () => { row.remove(); extraRows.splice(extraRows.indexOf(entry), 1); }));
+            extraRows.push(entry);
+            props.insertBefore(row, addPropBtn);
+        }
+        const addPropBtn = dashed('Добавить поле', () => addProp());
+        props.appendChild(addPropBtn);
+        for (const [k, v] of Object.entries((saved && saved.extra) || {})) addProp(k, v);
+        if (saved && saved.extra && Object.keys(saved.extra).length) details.open = true;
+        dlg.appendChild(details);
+        function readExtra() {
+            const out = {};
+            for (const { kIn, vIn } of extraRows) {
+                const k = kIn.value.trim();
+                if (!k || k === 'id' || k === 'volumes') continue;
+                const raw = vIn.value.trim();
+                let v = raw;
+                try { v = JSON.parse(raw); } catch (_) {}
+                out[k] = v;
+            }
+            return out;
+        }
+
+        const foot = el('div', 'fkc-foot');
+        const report = el('button', 'fkc-btn fkc-primary', 'Сообщить о цензуре');
+        function renderReport() {
+            if (isReported(albumId, 'album')) { report.disabled = true; report.textContent = 'Уже отправлено'; }
+            else if (getMeta().albums[albumId]) { report.disabled = true; report.textContent = 'Уже подменяется'; }
+            else { report.disabled = false; report.textContent = 'Сообщить о цензуре'; }
+        }
+        renderReport();
+        const right = el('div', 'fkc-foot-right');
+        const del = el('button', 'fkc-btn fkc-secondary', 'Удалить подмену');
+        del.disabled = !saved;
+        const apply = el('button', 'fkc-btn fkc-primary', 'Применить');
+        right.appendChild(del);
+        right.appendChild(apply);
+        foot.appendChild(report);
+        foot.appendChild(right);
+        dlg.appendChild(foot);
+
+        const reportInfo = () => ({ title: shownTitle, artists: artistNames(shownArtists) });
+        report.addEventListener('click', async () => {
+            report.disabled = true;
+            await reportCensor(albumId, false, reportInfo(), 'album');
+            renderReport();
+        });
+
+        const closeDialog = () => {
+            if (cover.src.startsWith('blob:') && pickedCover) URL.revokeObjectURL(cover.src);
+            overlay.remove();
+            document.removeEventListener('keydown', onKey, true);
+        };
+        const onKey = (e) => { if (e.key === 'Escape') { e.stopPropagation(); closeDialog(); } };
+        document.addEventListener('keydown', onKey, true);
+        close.addEventListener('click', closeDialog);
+        overlay.addEventListener('mousedown', (e) => { if (e.target === overlay) closeDialog(); });
+
+        del.addEventListener('click', async () => {
+            try {
+                // вместе с подменой альбома уходят и свои треки, добавленные в него
+                for (const [id, t] of Object.entries(localTracks)) {
+                    if (t.custom && String(t.albumId) === String(albumId)) await removeLocalTrack(id);
+                }
+                await removeLocalAlbum(albumId);
+                closeDialog();
+                reopenAlbumPage(albumId);
+                showToast('Подмена альбома удалена.');
+            } catch (e) { showToast('Не удалось удалить подмену: ' + (e && e.message)); }
+        });
+
+        apply.addEventListener('click', async () => {
+            apply.disabled = true;
+            try {
+                // берём прежнюю свою подмену и меняем то, что поменял пользователь
+                const rec = Object.assign({}, saved || {}, { id: albumId });
+                const title = input.value.trim();
+                if (title && title !== shownTitle) rec.title = title;
+                if (pickedCover) rec.cover = pickedCover;
+                if (artistsChanged()) rec.artists = artists.map(slimArtist);
+                const finalVolumes = volumes.filter((v) => v.length);
+                const ids = finalVolumes.map((v) => v.map((r) => r.id));
+                if (JSON.stringify(ids) !== shownVol) rec.volumes = ids;
+                rec.replaceArtists = !swInput.disabled && swInput.checked;
+                if (!rec.replaceArtists) delete rec.replaceArtists;
+                const extra = readExtra();
+                if (Object.keys(extra).length) rec.extra = extra; else delete rec.extra;
+                const changed = ['title', 'cover', 'artists', 'volumes', 'replaceArtists', 'extra'].some((k) => k in rec);
+                if (!changed) { closeDialog(); return; }
+
+                // свои треки — до альбома: альбом ссылается на них
+                const albumTitle = rec.title || shownTitle;
+                const albumArtists = artists.map(slimArtist);
+                const added = [];
+                for (const r of finalVolumes.flat()) {
+                    if (!r.isNew) continue;
+                    const trackArtists = uniqArtists(albumArtists.concat(r.isNew.extra.map(slimArtist)));
+                    await saveLocalTrack({
+                        id: r.id, custom: true, title: r.isNew.title, artists: trackArtists,
+                        file: r.isNew.file, fileName: r.isNew.file.name, codec: r.isNew.codec, durationMs: r.isNew.durationMs || 0,
+                        albumId: String(albumId), albumTitle, albumArtists, albumCover: coverSrc,
+                    });
+                    added.push({ title: r.isNew.title, artists: artistNames(trackArtists) });
+                }
+                // свои треки, убранные из альбома, больше не нужны
+                const kept = new Set(ids.flat());
+                for (const id of shownCustom) if (!kept.has(id)) await removeLocalTrack(id);
+
+                await saveLocalAlbum(rec);
+                if (!saved) reportCensor(albumId, true, reportInfo(), 'album');
+                if (added.length) logAddedTracks(albumId, albumTitle, artistNames(albumArtists), added);
+                closeDialog();
+                reopenAlbumPage(albumId);
+                showToast('Подмена альбома сохранена.');
+            } catch (e) {
+                apply.disabled = false;
+                showToast('Не удалось сохранить: ' + (e && e.message));
+            }
+        });
+
+        document.body.appendChild(overlay);
+        setTimeout(() => input.focus(), 0);
+    }
+
     // ---- «Сообщить о цензуре»: как в аддоне FckCensor, в их очередь модерации (с разрешения автора) ----
     // Публичный ключ Supabase хранится так же, как в аддоне: base64 с лишними символами по краям
     const REPORT_URL = 'https://pzomqvgckpgkshxhpite.supabase.co/rest/v1/reported_tracks';
     const REPORT_KEY = 'nkrikZXlKaGJHY2lPaUpJVXpJMU5pSXNJblI1Y0NJNklrcFhWQ0o5LmV5SnBjM01pT2lKemRYQmhZbUZ6WlNJc0luSmxaaUk2SW5CNmIyMXhkbWRqYTNCbmEzTm9lR2h3YVhSbElpd2ljbTlzWlNJNkltRnViMjRpTENKcFlYUWlPakUzTnpVd05UZ3pOREVzSW1WNGNDSTZNakE1TURZek5ETTBNWDAuZ2dDeE0tdmVyM2dEV1VCV3loU0JmeTNuN3JwZFc4anRseFJRVkNYa2hOZ3x5b3VyIG1vbSBpcyBmYXR0o6O55';
     const REPORTED_STORAGE = 'fkc-reported';
 
-    // Своя очередь модерации FkCensor (Supabase, схема в supabase/schema.sql).
+    // Своя очередь модерации F_ckCensor (Supabase, схема в supabase/schema.sql).
     // Пока адрес пустой, сообщения уходят только в очередь FckCensor.
     const OWN_REPORT_URL = 'https://mrqlfhiqjinueibsxnof.supabase.co';
     const OWN_REPORT_KEY = 'sb_publishable_6yhyZv93vTD26vz-F4VQSQ_pN12qEMn'; // публичный: только добавление записей
@@ -1093,19 +2324,20 @@
         catch (_) { return new Set(); }
     }
 
-    function isReported(id) { return reportedSet().has('track_' + id); }
+    function isReported(id, type) { return reportedSet().has((type || 'track') + '_' + id); }
 
-    function markReported(id) {
+    function markReported(id, type) {
         const set = reportedSet();
-        set.add('track_' + id);
+        set.add((type || 'track') + '_' + id);
         try { localStorage.setItem(REPORTED_STORAGE, JSON.stringify([...set])); } catch (_) {}
     }
 
     // replaced=true — пользователь сам подставил свой файл; тогда сообщение уходит молча, как в аддоне.
     // Сообщение уходит в очередь FckCensor и в свою, если она настроена; успех — если дошло хоть куда-то.
-    async function reportCensor(id, replaced, info) {
-        if (!isNum(String(id)) || isReported(id)) return false;
-        const body = { track_id: Number(id), type: 'track', replaced: !!replaced };
+    async function reportCensor(id, replaced, info, type) {
+        const kind = type || 'track';
+        if (!isNum(String(id)) || isReported(id, kind)) return false;
+        const body = { track_id: Number(id), type: kind, replaced: !!replaced };
         const jobs = [postReport(REPORT_URL, reportKey(), body)];
         if (OWN_REPORT_URL && OWN_REPORT_KEY) {
             jobs.push(postReport(OWN_REPORT_URL.replace(/[/]+$/, '') + '/rest/v1/reports', OWN_REPORT_KEY, Object.assign({}, body, {
@@ -1115,11 +2347,11 @@
             })));
         }
         const results = await Promise.allSettled(jobs);
-        results.forEach((r) => { if (r.status === 'rejected') console.error('[FkCensor] сообщение о цензуре:', r.reason && r.reason.message); });
+        results.forEach((r) => { if (r.status === 'rejected') console.error('[F_ckCensor] сообщение о цензуре:', r.reason && r.reason.message); });
         const ok = results.some((r) => r.status === 'fulfilled' && r.value);
-        if (ok) markReported(id);
+        if (ok) markReported(id, kind);
         if (!replaced) {
-            showToast(ok ? 'Спасибо! В скором времени этот трек будет добавлен в список автоматически подменяемых.'
+            showToast(ok ? 'Спасибо! В скором времени этот ' + (kind === 'album' ? 'альбом' : 'трек') + ' будет добавлен в список автоматически подменяемых.'
                 : 'Не удалось сообщить о цензуре.');
         }
         return ok;
@@ -1130,8 +2362,14 @@
         return !!(window.__fkCensorReplacements || {})[id] || !!getMeta().tracks[id] || !!localTracks[id];
     }
 
-    window.__fkcLocal = { open: openSpoofDialog, menus: injectTrackMenus, all: () => localTracks, isReported };
+    window.__fkcLocal = {
+        open: openSpoofDialog, openAlbum: openAlbumDialog, menus: injectTrackMenus,
+        all: () => localTracks, albums: () => localAlbums, isReported,
+        // для проверки руками из консоли
+        saveTrack: saveLocalTrack, saveAlbum: saveLocalAlbum, newCustomId: allocCustomId, customDto: customTrackDto,
+    };
     loadLocalTracks();
+    loadLocalAlbums();
 
     // Плеер получает источник звука через getFileInfo / getFileInfoBatch у ресурса file-info.
     // Ответ: { downloadInfo | fileInfo: { trackId, codec, transport, key, urls, url, ... } }
@@ -1155,7 +2393,7 @@
 
     function noteReplaced(trackId, url) {
         const id = String(trackId);
-        console.log('[FkCensor] Заменяю трек', id, '->', url);
+        console.log('[F_ckCensor] Заменяю трек', id, '->', url);
         const m = getMeta();
         const album = m.albums[m.trackAlbums[id]] || {};
         const cover = window.__fkcCovers[id] || (m.tracks[id] || {}).coverUri || album.coverUri || '';
@@ -1173,9 +2411,11 @@
             if (!url) return origSingle.call(this, params, ...rest);
 
             // Сначала настоящий ответ: из него берём остальные поля. Если трек недоступен
-            // или запрос упал — собираем ответ сами.
+            // или запрос упал — собираем ответ сами. Свой трек сервер не знает — его не спрашиваем.
             let res = null;
-            try { res = await origSingle.call(this, params, ...rest); } catch(_) {}
+            if (!isCustomId(trackId)) {
+                try { res = await origSingle.call(this, params, ...rest); } catch(_) {}
+            }
             const field = res && 'fileInfo' in res ? 'fileInfo' : 'downloadInfo';
             const base = res && res[field];
             noteReplaced(trackId, url);
@@ -1190,8 +2430,16 @@
                 const hits = ids.filter((id) => getReplacementUrl(id));
                 if (!hits.length) return origBatch.call(this, params, ...rest);
 
+                // свои треки из пакетного запроса убираем: из-за неизвестного id сервер
+                // мог бы не ответить и про остальные
                 let res = null;
-                try { res = await origBatch.call(this, params, ...rest); } catch(_) {}
+                const real = ids.filter((id) => !isCustomId(id));
+                if (real.length) {
+                    const p = Object.assign({}, params, {
+                        trackIds: Array.isArray(raw) ? raw.filter((x) => !isCustomId(String(x))) : real.join(','),
+                    });
+                    try { res = await origBatch.call(this, p, ...rest); } catch(_) {}
+                }
                 res = res || {};
                 const field = 'fileInfos' in res ? 'fileInfos' : 'downloadInfos';
                 const list = Array.isArray(res[field]) ? res[field].slice() : [];
@@ -1233,7 +2481,7 @@
         }
     }
     if (!patched.length) return false;
-    console.log('[FkCensor] file-info hooked ✓ (модули ' + patched.join(', ') + ')');
+    console.log('[F_ckCensor] file-info hooked ✓ (модули ' + patched.join(', ') + ')');
     return true;
     }
 
@@ -1241,10 +2489,10 @@
     (function tryHook() {
         if (hookFileInfo()) return;
         if (++attempts < 150) setTimeout(tryHook, 200);
-        else console.error('[FkCensor] ресурс file-info не найден');
+        else console.error('[F_ckCensor] ресурс file-info не найден');
     })();
 
-    console.log('[FkCensor] Renderer inject OK, треков:', Object.keys(window.__fkCensorReplacements || {}).length);
+    console.log('[F_ckCensor] Renderer inject OK, треков:', Object.keys(window.__fkCensorReplacements || {}).length);
 })();
 `;
     }
@@ -1260,11 +2508,11 @@
             });
         }
 
-        // Сообщения [FkCensor] из окна клиента дублируем в лог
+        // Сообщения [F_ckCensor] из окна клиента дублируем в лог
         function forwardConsole(wc) {
             wc.on('console-message', (e, level, message) => {
                 const msg = (e && typeof e.message === 'string') ? e.message : message;
-                if (typeof msg === 'string' && msg.includes('[FkCensor]')) log('окно:', msg.replace('[FkCensor] ', ''));
+                if (typeof msg === 'string' && msg.includes('[F_ckCensor]')) log('окно:', msg.replace('[F_ckCensor] ', ''));
             });
         }
 
@@ -1297,7 +2545,7 @@
     function postToApp(path, body) {
         return new Promise((resolve, reject) => {
             const info = readIpcInfo();
-            if (!info) return reject(new Error('FkCensor не запущен'));
+            if (!info) return reject(new Error('F_ckCensor не запущен'));
             const data = Buffer.from(JSON.stringify(body));
             const req = require('http').request({
                 host: '127.0.0.1', port: info.port, path, method: 'POST', timeout: 3000,
@@ -1399,11 +2647,11 @@
                 nowPlaying,
                 events: report,
             });
-            if (!syncOk) log('связь с FkCensor есть, подмена', res.enabled ? 'включена' : 'на паузе');
+            if (!syncOk) log('связь с F_ckCensor есть, подмена', res.enabled ? 'включена' : 'на паузе');
             syncOk = true;
             enabledByApp = res.enabled === true;
         } catch(e) {
-            if (syncOk !== false) log('нет связи с FkCensor:', e.message);
+            if (syncOk !== false) log('нет связи с F_ckCensor:', e.message);
             syncOk = false;
             enabledByApp = false;
         }

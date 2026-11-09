@@ -277,7 +277,7 @@ func patchFile(headerJSON []byte, fileData []byte, targetPath string, newContent
 	return newHeaderJSON, newFileData, nil
 }
 
-var hashCachePath = filepath.Join(os.Getenv("LOCALAPPDATA"), "FkCensor", "original_hash.txt")
+var hashCachePath = filepath.Join(os.Getenv("LOCALAPPDATA"), "F_ckCensor", "original_hash.txt")
 
 // State описывает, что сейчас лежит в app.asar.
 type State int

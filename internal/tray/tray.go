@@ -4,8 +4,8 @@ package tray
 import (
 	"github.com/getlantern/systray"
 
-	"github.com/S4YN3X/FkCensor/assets"
-	"github.com/S4YN3X/FkCensor/internal/app"
+	"github.com/S4YN3X/F_ckCensor/assets"
+	"github.com/S4YN3X/F_ckCensor/internal/app"
 )
 
 // StatusTitle — короткая строка состояния, та же, что в окне.
@@ -22,7 +22,7 @@ func StatusTitle(s app.State) string {
 	case s.Patch == app.PatchBroken:
 		return "патч повреждён"
 	case !s.Enabled:
-		return "fkcensor на паузе"
+		return "на паузе"
 	default:
 		return "цензура отключена"
 	}
@@ -52,20 +52,20 @@ func Run(a *app.App, openWindow func()) {
 	mOpen := systray.AddMenuItem("открыть окно", "")
 	mRestart := systray.AddMenuItem("перезапустить яндекс музыку", "")
 	systray.AddSeparator()
-	mQuit := systray.AddMenuItem("выход", "закрыть fkcensor")
+	mQuit := systray.AddMenuItem("выход", "закрыть f_ckcensor")
 
 	update := func() {
 		s := a.Snapshot()
 		status := StatusTitle(s)
 		dot := "○ "
-		if s.Patch == app.PatchOK && s.Enabled && s.Busy == "" {
+		active := s.Patch == app.PatchOK && s.Enabled && s.Busy == ""
+		if active {
 			dot = "● "
-			systray.SetIcon(assets.IconActive)
-		} else {
-			systray.SetIcon(assets.IconInactive)
 		}
+		// иконка под тему программы; при смене темы в настройках меняется сразу
+		systray.SetIcon(assets.Icon(a.DarkIcons(), active))
 		mStatus.SetTitle(dot + status)
-		systray.SetTooltip("FkCensor — " + status)
+		systray.SetTooltip("F_ckCensor — " + status)
 
 		mToggle.SetTitle(toggleTitle(s))
 		if s.Busy != "" || s.Patch == app.PatchNoYM {

@@ -1,4 +1,7 @@
 FkCensor.exe
+F_ckCensor.exe
+/F_ckCensor
+F_ckCensor-*
 /FkCensor
 FkCensor-*
 *.exe
@@ -7,3 +10,4 @@ FkCensor-*
 *.exe~
 tools/
 supabase/
+admin/

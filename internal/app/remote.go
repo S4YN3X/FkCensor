@@ -9,14 +9,14 @@ import (
 	"strings"
 	"time"
 
-	"github.com/S4YN3X/FkCensor/internal/winutil"
+	"github.com/S4YN3X/F_ckCensor/internal/winutil"
 )
 
 var httpClient = &http.Client{Timeout: 20 * time.Second}
 
 func getJSON(url string, v any) (int, error) {
 	req, _ := http.NewRequest("GET", url, nil)
-	req.Header.Set("User-Agent", "FkCensor")
+	req.Header.Set("User-Agent", "F_ckCensor")
 	resp, err := httpClient.Do(req)
 	if err != nil {
 		return 0, err
@@ -97,26 +97,31 @@ func (a *App) checkUpdate(silent bool) {
 	a.mu.Unlock()
 	a.changed()
 
-	var rel struct {
-		TagName string `json:"tag_name"`
-		HTMLURL string `json:"html_url"`
-	}
+	var rel release
 	// GitHub из России отвечает нестабильно: одна повторная попытка спасает большинство случаев
 	var code int
 	var err error
 	for attempt := 0; attempt < 2; attempt++ {
-		if code, err = getJSON("https://api.github.com/repos/S4YN3X/FkCensor/releases/latest", &rel); err == nil || code == http.StatusNotFound {
+		if code, err = getJSON("https://api.github.com/repos/S4YN3X/F_ckCensor/releases/latest", &rel); err == nil || code == http.StatusNotFound {
 			break
 		}
 		time.Sleep(2 * time.Second)
 	}
 
+	u := a.recordRelease(rel, code, err)
+	if silent && u.Newer {
+		winutil.Notify("доступна новая версия f_ckcensor", rel.TagName+" — откройте окно программы, вкладка «инфо»")
+	}
+}
+
+// recordRelease запоминает результат проверки релиза для вкладки «инфо».
+func (a *App) recordRelease(rel release, code int, err error) UpdateInfo {
 	u := UpdateInfo{Checked: time.Now().UnixMilli()}
 	switch {
 	case code == http.StatusNotFound:
 		u.Message = "релизов пока нет"
 	case err != nil:
-		fmt.Fprintln(os.Stderr, "[FkCensor] проверка обновлений:", err)
+		fmt.Fprintln(os.Stderr, "[F_ckCensor] проверка обновлений:", err)
 		if code != 0 {
 			u.Message = fmt.Sprintf("github ответил ошибкой %d — попробуйте позже", code)
 		} else {
@@ -135,10 +140,7 @@ func (a *App) checkUpdate(silent bool) {
 	a.update = u
 	a.mu.Unlock()
 	a.changed()
-
-	if silent && u.Newer {
-		winutil.Notify("доступна новая версия fkcensor", rel.TagName+" — откройте окно программы, вкладка «инфо»")
-	}
+	return u
 }
 
 // newerVersion сравнивает версии вида v1.2.3.

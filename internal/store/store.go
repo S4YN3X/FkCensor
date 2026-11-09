@@ -1,4 +1,4 @@
-// Package store хранит настройки, историю замен и статистику в %LOCALAPPDATA%\FkCensor.
+// Package store хранит настройки, историю замен и статистику в %LOCALAPPDATA%\F_ckCensor.
 package store
 
 import (
@@ -9,22 +9,29 @@ import (
 	"time"
 )
 
-const historyLimit = 500
-
-// Fallback — что делать, если файл замены не загрузился.
-const (
-	FallbackSilent = "silent" // молча играть оригинал
-	FallbackNotify = "notify" // играть оригинал и показать уведомление
-)
+const historyLimit = 1000
 
 type Settings struct {
-	Enabled    bool   `json:"enabled"`
-	Autostart  bool   `json:"autostart"`
-	RestartYM  bool   `json:"restartYM"`
-	AutoUpdate bool   `json:"autoUpdate"`
-	HideToTray bool   `json:"hideToTray"`
-	Fallback   string `json:"fallback"`
-	YMDir      string `json:"ymDir"`
+	Enabled    bool `json:"enabled"`
+	Autostart  bool `json:"autostart"`
+	RestartYM  bool `json:"restartYM"`
+	AutoUpdate bool `json:"autoUpdate"`
+	HideToTray bool `json:"hideToTray"`
+	// Theme — тема окна: system (как в Windows), light или dark
+	Theme string `json:"theme"`
+	// Animations — анимации в окне программы (по умолчанию включены)
+	Animations bool `json:"animations"`
+	// UIScale — масштаб интерфейса в процентах поверх масштаба Windows: 100, 125, 150, 175, 200
+	UIScale int    `json:"uiScale"`
+	YMDir   string `json:"ymDir"`
+}
+
+// Zoom — масштаб интерфейса долей (1 = 100%).
+func (s Settings) Zoom() float64 {
+	if s.UIScale < 100 || s.UIScale > 200 {
+		return 1
+	}
+	return float64(s.UIScale) / 100
 }
 
 // Entry — один трек в истории.
@@ -35,6 +42,8 @@ type Entry struct {
 	Cover   string    `json:"cover"`
 	Time    time.Time `json:"time"`
 	Failed  bool      `json:"failed"`
+	// Original — трек сыграл как есть: замены для него нет. В статистику не идёт.
+	Original bool `json:"original,omitempty"`
 }
 
 type Stats struct {
@@ -58,7 +67,42 @@ type Store struct {
 }
 
 // Dir — папка данных программы.
-func Dir() string { return filepath.Join(os.Getenv("LOCALAPPDATA"), "FkCensor") }
+func Dir() string { return filepath.Join(os.Getenv("LOCALAPPDATA"), "F_ckCensor") }
+
+// LegacyDir — папка данных под старым названием программы (FkCensor).
+func LegacyDir() string { return filepath.Join(os.Getenv("LOCALAPPDATA"), "FkCensor") }
+
+// RemoveLegacy удаляет папку старого названия, если в ней не осталось настроек
+// (их уже перенесли): там лишь копия ipc.json и журнал старого патча.
+func RemoveLegacy() {
+	old := LegacyDir()
+	if _, err := os.Stat(filepath.Join(old, "state.json")); err == nil {
+		return
+	}
+	_ = os.RemoveAll(old)
+}
+
+// MigrateLegacy переносит данные из папки старого названия в новую: настройки, историю,
+// кэш окна. Новая папка уже есть — ничего не делает. Если папку целиком не переименовать
+// (файл занят), копирует главное: настройки и историю.
+func MigrateLegacy() {
+	newDir, oldDir := Dir(), LegacyDir()
+	if _, err := os.Stat(newDir); err == nil {
+		return
+	}
+	if _, err := os.Stat(oldDir); err != nil {
+		return
+	}
+	if os.Rename(oldDir, newDir) == nil {
+		return
+	}
+	_ = os.MkdirAll(newDir, 0755)
+	for _, name := range []string{"state.json", "original_hash.txt"} {
+		if data, err := os.ReadFile(filepath.Join(oldDir, name)); err == nil {
+			_ = os.WriteFile(filepath.Join(newDir, name), data, 0644)
+		}
+	}
+}
 
 func Open() *Store {
 	s := &Store{path: filepath.Join(Dir(), "state.json")}
@@ -67,7 +111,8 @@ func Open() *Store {
 		RestartYM:  true,
 		AutoUpdate: true,
 		HideToTray: true,
-		Fallback:   FallbackNotify,
+		Animations: true,
+		UIScale:    100,
 	}
 	if raw, err := os.ReadFile(s.path); err == nil {
 		_ = json.Unmarshal(raw, &s.d)
@@ -124,14 +169,15 @@ func (s *Store) History() []Entry {
 
 // RecentlyRecorded — был ли трек уже записан за последние window.
 // Клиент может запросить файл повторно (предзагрузка, перемотка), это не новая замена.
-func (s *Store) RecentlyRecorded(trackID string, window time.Duration) bool {
+// withOriginal — учитывать и записи «без замены».
+func (s *Store) RecentlyRecorded(trackID string, window time.Duration, withOriginal bool) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for _, e := range s.d.History {
 		if time.Since(e.Time) > window {
 			break
 		}
-		if e.TrackID == trackID {
+		if e.TrackID == trackID && (withOriginal || !e.Original) {
 			return true
 		}
 	}
@@ -143,9 +189,11 @@ func (s *Store) Record(e Entry) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.rollDay(e.Time)
-	if e.Failed {
+	switch {
+	case e.Original:
+	case e.Failed:
 		s.d.Stats.Failed++
-	} else {
+	default:
 		s.d.Stats.Total++
 		s.d.Stats.Today++
 	}

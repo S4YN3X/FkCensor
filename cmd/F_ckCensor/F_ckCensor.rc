@@ -1,0 +1,3 @@
+// Ресурсы exe: значок программы в проводнике и на панели задач.
+// Пересборка: make icon (нужен windres из MinGW).
+1 ICON "../../assets/icon_black.ico"

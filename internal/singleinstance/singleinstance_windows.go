@@ -20,5 +20,6 @@ func Acquire() bool {
 func Release() {
 	if mutexHandle != 0 {
 		windows.CloseHandle(mutexHandle)
+		mutexHandle = 0
 	}
 }

@@ -9,19 +9,18 @@ import (
 	"sync"
 	"time"
 
-	"github.com/S4YN3X/FkCensor/internal/asarpatch"
-	"github.com/S4YN3X/FkCensor/internal/ipc"
-	"github.com/S4YN3X/FkCensor/internal/store"
-	"github.com/S4YN3X/FkCensor/internal/winutil"
-	"github.com/S4YN3X/FkCensor/internal/ym"
+	"github.com/S4YN3X/F_ckCensor/internal/asarpatch"
+	"github.com/S4YN3X/F_ckCensor/internal/ipc"
+	"github.com/S4YN3X/F_ckCensor/internal/store"
+	"github.com/S4YN3X/F_ckCensor/internal/winutil"
+	"github.com/S4YN3X/F_ckCensor/internal/ym"
 )
 
 const (
-	RepoURL = "https://github.com/S4YN3X/FkCensor"
+	RepoURL = "https://github.com/S4YN3X/F_ckCensor"
 
 	connectedTimeout = 6 * time.Second
 	dedupeWindow     = 10 * time.Minute
-	failNotifyEvery  = 10 * time.Minute
 )
 
 // Patch — состояние патча, как его видит интерфейс.
@@ -53,14 +52,28 @@ type App struct {
 	listCount  int
 	reachable  bool
 	nowPlaying *ipc.NowPlaying
+	// lastPlayed — последний трек, записанный в историю по «сейчас играет»
+	lastPlayed string
 	update     UpdateInfo
-	lastFail   time.Time
+	// обновление при запуске: состояние для заставки и отмена скачивания
+	startup       StartupUpdate
+	startupTaken  bool
+	startupCancel func()
+
+	// OnRestart вызывается, когда новая версия поставлена на место exe: перезапустить программу.
+	OnRestart func(exe string) error
+
+	// OnPatchProblem вызывается, когда патч в Яндекс Музыке перестал работать: слетел
+	// (клиент обновился), устарел или повреждён. Только при переходе из рабочего состояния.
+	OnPatchProblem func()
 
 	// ShowWindow вызывается, когда вторая копия программы просит показать окно.
 	OnShowWindow func()
 }
 
-func New(version, script string, st *store.Store) *App {
+// New создаёт программу. launch — как она запущена: от этого зависит, где проверять
+// обновление — на заставке окна, в фоне (автозапуск в трей) или не проверять (сразу после обновления).
+func New(version, script string, st *store.Store, launch Launch) *App {
 	a := &App{Version: version, script: script, store: st, listeners: map[int]func(){}, reachable: true}
 	if t := st.LastUpdateCheck(); !t.IsZero() {
 		a.update.Checked = t.UnixMilli()
@@ -72,7 +85,12 @@ func New(version, script string, st *store.Store) *App {
 	}
 	go a.watchPatch()
 	if st.Settings().AutoUpdate {
-		go a.checkUpdate(true)
+		switch launch {
+		case LaunchWindow:
+			a.startup.Phase = "pending" // проверит заставка
+		case LaunchTray:
+			go a.backgroundUpdate()
+		}
 	}
 	return a
 }
@@ -128,11 +146,29 @@ func (a *App) RefreshPatch() {
 
 	a.mu.Lock()
 	diff := a.ymDir != dir || a.patch != patch || a.ymVersion != version
+	broke := a.patch == PatchOK && PatchProblem(patch)
 	a.ymDir, a.patch, a.ymVersion = dir, patch, version
+	cb := a.OnPatchProblem
 	a.mu.Unlock()
 	if diff {
 		a.changed()
 	}
+	if broke && cb != nil {
+		go cb()
+	}
+}
+
+// PatchProblem — патч есть смысл (пере)установить: его нет, он устарел или повреждён.
+// Нет самой Яндекс Музыки — не проблема патча.
+func PatchProblem(p Patch) bool {
+	return p == PatchNone || p == PatchOutdated || p == PatchBroken
+}
+
+// PatchState — текущее состояние патча.
+func (a *App) PatchState() Patch {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.patch
 }
 
 // watchPatch замечает, что клиент обновился и патч слетел.
@@ -281,12 +317,21 @@ func (a *App) SetSetting(key string, value any) error {
 		a.store.UpdateSettings(func(s *store.Settings) { s.AutoUpdate = b })
 	case "hideToTray":
 		a.store.UpdateSettings(func(s *store.Settings) { s.HideToTray = b })
-	case "fallback":
+	case "animations":
+		a.store.UpdateSettings(func(s *store.Settings) { s.Animations = b })
+	case "theme":
 		v, _ := value.(string)
-		if v != store.FallbackSilent && v != store.FallbackNotify {
-			return fmt.Errorf("неизвестное значение %q", v)
+		if v != "system" && v != "light" && v != "dark" {
+			return fmt.Errorf("неизвестная тема %q", v)
 		}
-		a.store.UpdateSettings(func(s *store.Settings) { s.Fallback = v })
+		a.store.UpdateSettings(func(s *store.Settings) { s.Theme = v })
+	case "uiScale":
+		v, _ := value.(float64) // числа из JSON приходят как float64
+		pct := int(v)
+		if pct != 100 && pct != 125 && pct != 150 && pct != 175 && pct != 200 {
+			return fmt.Errorf("неизвестный масштаб %v", value)
+		}
+		a.store.UpdateSettings(func(s *store.Settings) { s.UIScale = pct })
 	default:
 		return fmt.Errorf("неизвестная настройка %q", key)
 	}
@@ -307,6 +352,29 @@ func (a *App) DismissError() {
 }
 
 func (a *App) Settings() store.Settings { return a.store.Settings() }
+
+// DarkWindow — тёмная ли тема окна: из настроек, «как в системе» — по теме приложений Windows.
+func (a *App) DarkWindow() bool {
+	switch a.store.Settings().Theme {
+	case "dark":
+		return true
+	case "light":
+		return false
+	}
+	return winutil.AppsDark()
+}
+
+// DarkIcons — нужны ли иконки для тёмной темы (белый квадрат) в трее и на панели задач.
+// Тема берётся из настроек программы; «как в системе» — по цвету панели задач Windows.
+func (a *App) DarkIcons() bool {
+	switch a.store.Settings().Theme {
+	case "dark":
+		return true
+	case "light":
+		return false
+	}
+	return winutil.TaskbarDark()
+}
 
 // --- ipc.Handler ---
 
@@ -332,6 +400,16 @@ func (a *App) YMSync(req ipc.SyncRequest) ipc.SyncResponse {
 	for _, e := range req.Events {
 		a.handleEvent(e)
 	}
+	// События замены пришли выше, поэтому уже записанный трек второй раз не попадёт
+	if np := req.NowPlaying; np != nil && np.Playing && np.TrackID != "" {
+		a.mu.Lock()
+		isNew := np.TrackID != a.lastPlayed
+		a.lastPlayed = np.TrackID
+		a.mu.Unlock()
+		if isNew {
+			a.recordPlay(*np)
+		}
+	}
 	if !wasConnected || npChanged || len(req.Events) > 0 {
 		a.changed()
 	}
@@ -346,7 +424,7 @@ func samePlaying(x, y *ipc.NowPlaying) bool {
 }
 
 func (a *App) handleEvent(e ipc.Event) {
-	if e.TrackID == "" || a.store.RecentlyRecorded(e.TrackID, dedupeWindow) {
+	if e.TrackID == "" || a.store.RecentlyRecorded(e.TrackID, dedupeWindow, false) {
 		return
 	}
 	failed := e.Type == "failed"
@@ -365,29 +443,34 @@ func (a *App) handleEvent(e ipc.Event) {
 			entry.Title, entry.Artist = meta.Title, meta.Artist
 			a.changed()
 		}
-
-		if failed && a.store.Settings().Fallback == store.FallbackNotify {
-			a.mu.Lock()
-			due := time.Since(a.lastFail) > failNotifyEvery
-			if due {
-				a.lastFail = time.Now()
-			}
-			a.mu.Unlock()
-			if due {
-				winutil.Notify("замена не загрузилась", "«"+entry.Title+"» играет в зацензуренной версии. Возможно, GitHub недоступен — попробуйте VPN.")
-			}
-		}
 	}()
+}
+
+// recordPlay записывает в историю начавшийся трек: подменённый — как замену
+// (повторное воспроизведение без нового запроса файла), остальные — «без замены».
+func (a *App) recordPlay(np ipc.NowPlaying) {
+	if np.Replaced {
+		a.handleEvent(ipc.Event{Type: "replaced", TrackID: np.TrackID})
+		return
+	}
+	if a.store.RecentlyRecorded(np.TrackID, dedupeWindow, true) {
+		return
+	}
+	a.store.Record(store.Entry{
+		TrackID: np.TrackID, Title: np.Title, Artist: np.Artist, Cover: np.Artwork,
+		Time: time.Now(), Original: true,
+	})
 }
 
 // --- снимок для интерфейса ---
 
 type HistoryItem struct {
-	Title  string `json:"title"`
-	Artist string `json:"artist"`
-	Cover  string `json:"cover"`
-	Time   int64  `json:"time"`
-	Failed bool   `json:"failed"`
+	Title    string `json:"title"`
+	Artist   string `json:"artist"`
+	Cover    string `json:"cover"`
+	Time     int64  `json:"time"`
+	Failed   bool   `json:"failed"`
+	Original bool   `json:"original"`
 }
 
 type NowPlayingView struct {
@@ -414,6 +497,7 @@ type State struct {
 	History    []HistoryItem   `json:"history"`
 	Settings   store.Settings  `json:"settings"`
 	Update     UpdateInfo      `json:"update"`
+	Startup    StartupUpdate   `json:"startup"`
 }
 
 func (a *App) Snapshot() State {
@@ -438,15 +522,16 @@ func (a *App) Snapshot() State {
 		Stats:     a.store.Stats(),
 		Settings:  s,
 		Update:    a.update,
+		Startup:   a.startup,
 	}
 	if np := a.nowPlaying; np != nil && st.Connected {
-		st.NowPlaying = &NowPlayingView{NowPlaying: *np, Replaced: playingReplaced(np, hist)}
+		st.NowPlaying = &NowPlayingView{NowPlaying: *np, Replaced: np.Replaced || playingReplaced(np, hist)}
 	}
 	a.mu.Unlock()
 
 	st.History = make([]HistoryItem, len(hist))
 	for i, e := range hist {
-		st.History[i] = HistoryItem{Title: e.Title, Artist: e.Artist, Cover: e.Cover, Time: e.Time.UnixMilli(), Failed: e.Failed}
+		st.History[i] = HistoryItem{Title: e.Title, Artist: e.Artist, Cover: e.Cover, Time: e.Time.UnixMilli(), Failed: e.Failed, Original: e.Original}
 	}
 	return st
 }
