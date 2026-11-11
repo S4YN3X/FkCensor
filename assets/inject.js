@@ -164,11 +164,30 @@
     // То же, что postProcess в аддоне: треки и альбомы с подменой исполнителей попадают
     // в профили этих исполнителей, треки восстановленных альбомов наследуют обложку альбома
     function postProcessMeta(m) {
+        // У альбома в записи нет исполнителей: берём самых частых среди подмен его треков.
+        // Нужны, когда альбом удалён: показать исполнителя и вставить альбом в профиль
+        for (const album of Object.values(m.albums)) {
+            if ((Array.isArray(album.artists) && album.artists.length) || !Array.isArray(album.volumes)) continue;
+            const count = {};
+            const byKey = {};
+            for (const vol of album.volumes) {
+                for (const x of vol) {
+                    const t = m.tracks[volumeId(x)];
+                    if (!t || !Array.isArray(t.artists) || !t.artists.length) continue;
+                    const key = t.artists.map((a) => a && a.id).join(',');
+                    count[key] = (count[key] || 0) + 1;
+                    byKey[key] = t.artists;
+                }
+            }
+            const best = Object.keys(count).sort((a, b) => count[b] - count[a])[0];
+            if (best) album.__fckCensor = Object.assign({}, album.__fckCensor, { trackArtists: byKey[best] });
+        }
         for (const [type, map] of [['tracks', m.tracks], ['albums', m.albums]]) {
             for (const [id, e] of Object.entries(map)) {
                 const fc = e.__fckCensor || {};
-                if (!Array.isArray(e.artists) || !e.artists.length || fc.insertionIndex === null) continue;
-                for (const a of e.artists) {
+                const artists = Array.isArray(e.artists) && e.artists.length ? e.artists : fc.trackArtists;
+                if (!Array.isArray(artists) || !artists.length || fc.insertionIndex === null) continue;
+                for (const a of artists) {
                     if (!a || !a.id) continue;
                     const ins = m.insertions[a.id] = Object.assign({ tracks: [], albums: [] }, m.insertions[a.id]);
                     ins[type] = [...(ins[type] || []), { releaseId: id, index: fc.insertionIndex }];
@@ -191,10 +210,12 @@
     // Последний удачно загруженный вариант каждого списка: сбой одного не стирает его треки
     const loadedLists = {};
 
-    function fetchList(list) {
+    // fresh — в обход кэша GitHub: свежий коммит иначе виден не сразу, а через несколько минут
+    function fetchList(list, fresh) {
         return new Promise((resolve) => {
             try {
-                const req = require('electron').net.request(list.url);
+                const url = fresh ? list.url + (list.url.includes('?') ? '&' : '?') + 't=' + Date.now() : list.url;
+                const req = require('electron').net.request(url);
                 const chunks = [];
                 req.on('response', (res) => {
                     res.on('data', (chunk) => { chunks.push(chunk); });
@@ -233,8 +254,24 @@
         return out;
     }
 
-    async function loadList() {
-        const results = await Promise.all(LISTS.map((l) => fetchList(l)));
+    // Когда началась последняя закончившаяся загрузка списков: по ней программа понимает,
+    // что просьба «обновить список» выполнена
+    let listLoadedAt = 0;
+    let listLoading = false;
+    // удалось ли скачать хоть один список в последней загрузке: при ошибке программа скажет
+    // пользователю, что обновить не вышло, а не «обновлено»
+    let listLoadOk = false;
+
+    async function loadList(fresh) {
+        const started = Date.now();
+        listLoading = true;
+        try { return await loadListNow(fresh); }
+        finally { listLoadedAt = started; listLoading = false; }
+    }
+
+    async function loadListNow(fresh) {
+        const results = await Promise.all(LISTS.map((l) => fetchList(l, fresh)));
+        listLoadOk = results.some(Boolean);
         let updated = false;
         LISTS.forEach((l, i) => {
             const p = results[i];
@@ -266,6 +303,7 @@
 
     function buildDataScript() {
         return `window.__fkCensorReplacements = ${JSON.stringify(replacements)}; window.__fkCensorMeta = ${JSON.stringify(meta)};` +
+            ' ' + likesScript() +
             ` window.__fkCensorEnabled = ${enabledByApp}; window.__fkCensorActive = ${isActive()};` +
             ' window.__fkcBadgesRefresh && window.__fkcBadgesRefresh();';
     }
@@ -288,8 +326,16 @@
 
     // Очередь замен и «сейчас играет» — главный процесс забирает их через __fkcTake()
     window.__fkcEvents = [];
+    // Лайки треков, которых нет в Яндекс Музыке: их хранит программа (likes.json).
+    // __fkcLikes — uid аккаунта → [{ id, albumId, timestamp }], новые сверху;
+    // __fkcLikeOps — что лайкнули и сняли с прошлого обмена с программой
+    window.__fkcLikes = window.__fkcLikes || {};
+    window.__fkcLikeOps = window.__fkcLikeOps || [];
+    // треки, которые Яндекс отдал недоступными (удалены), а подмена сделала доступными
+    window.__fkcGhost = window.__fkcGhost || new Set();
     window.__fkcTake = function() {
         const events = window.__fkcEvents.splice(0);
+        const likeOps = window.__fkcLikeOps.splice(0);
         let nowPlaying = null;
         const ms = navigator.mediaSession;
         const m = ms && ms.metadata;
@@ -311,12 +357,14 @@
                 replaced: !!(trackId && getReplacementUrl(trackId)),
             };
         }
-        return { events, nowPlaying };
+        return { events, nowPlaying, likeOps };
     };
 
 
     // ---- Подмена метаданных: каждый ответ api.music.yandex.net проходит через Response.json ----
     const API_PREFIX = 'https://api.music.yandex.net/';
+    // Ответ API бывает в обёртке { invocationInfo, result } (свои запросы) и без неё (запросы клиента)
+    const resultOf = (data) => (data && typeof data === 'object' && !Array.isArray(data) && data.result !== undefined ? data.result : data);
     const RKN_DISCLAIMER = '65256e7f0ec8594f3459e3fa';
     const EMPTY_META = { tracks: {}, albums: {}, artists: {}, insertions: {}, trackAlbums: {} };
     const getMeta = () => window.__fkCensorMeta || EMPTY_META;
@@ -362,21 +410,75 @@
 
     // Удалённого альбома (или альбома с таким id нет вовсе) API отдаёт заглушку { id, error: 'not-found' }.
     // Если альбом есть в списке замен, собираем его из записи: клиент покажет его как обычный
+    // альбомы, которых нет в Яндекс Музыке (удалены или созданы в базе): их ищет поиск
+    const goneAlbums = new Set();
     const ALBUM_DEFAULTS = {
         title: 'Без названия', type: 'album', metaType: 'music', availableForPremiumUsers: true, availableForMobile: true,
         availablePartially: false, labels: [], genre: '', artists: [], trackCount: 0, likesCount: 0, recent: false,
         veryImportant: false, bests: [], disclaimers: [], sortOrder: 'asc',
     };
+    // Чего нет в записи, берём по порядку: название волны альбома (Яндекс отдаёт его и у удалённого),
+    // запомненный вид альбома, пока он был доступен, исполнителей по трекам альбома
     function reviveAlbum(a) {
+        const id = String(idOf(a));
+        goneAlbums.add(id);
         delete a.error;
+        if (a.title === undefined && a.customWave && a.customWave.title) {
+            a.title = a.customWave.title;
+            rememberSeenAlbum(id, Object.assign({}, seenAlbums[id], { title: a.title }));
+        }
+        const seen = seenAlbums[id] || {};
+        // названия нет нигде: оно есть в волне ответа with-tracks — запрашиваем его один раз
+        if (a.title === undefined && !seen.title && !albumAsked.has(id + '/wave') && window.__fkcApiHeaders) {
+            albumAsked.add(id + '/wave');
+            apiFetch('albums/' + id + '/with-tracks').then((r) => r.json()).catch(() => {});
+        }
+        for (const [k, v] of Object.entries(seen)) if (a[k] === undefined) a[k] = v;
+        const fc = (albumMeta(id) || {}).__fckCensor || {};
+        if ((!Array.isArray(a.artists) || !a.artists.length) && Array.isArray(fc.trackArtists)) a.artists = fc.trackArtists;
         for (const [k, v] of Object.entries(ALBUM_DEFAULTS)) if (a[k] === undefined) a[k] = Array.isArray(v) ? [] : v;
         a.available = true;
     }
 
+    // Альбомы из ответов API (уже с подменой): по ним строим альбом трека, перенесённого
+    // в другой альбом. Названия нет — запрашиваем альбом один раз, ответ попадёт сюда же.
+    // Альбомы из базы ещё и запоминаем: если Яндекс удалит альбом, его название, год
+    // и исполнители останутся (в записи базы их может не быть)
+    const SEEN_ALBUMS = 'fkc-seen-albums';
+    const seenAlbums = (() => {
+        try { return JSON.parse(localStorage.getItem(SEEN_ALBUMS) || '{}') || {}; } catch (_) { return {}; }
+    })();
+    let seenSaveTimer = 0;
+    function rememberSeenAlbum(id, keep) {
+        seenAlbums[id] = keep;
+        if (!albumMeta(id)) return;
+        clearTimeout(seenSaveTimer);
+        seenSaveTimer = setTimeout(() => {
+            const out = {};
+            for (const [k, v] of Object.entries(seenAlbums)) if (albumMeta(k)) out[k] = v;
+            try { localStorage.setItem(SEEN_ALBUMS, JSON.stringify(out)); } catch (_) {}
+        }, 1000);
+    }
+    const albumAsked = new Set();
+    function seenAlbum(id) {
+        if (!seenAlbums[id] && !albumAsked.has(id) && window.__fkcApiHeaders) {
+            albumAsked.add(id);
+            apiFetch('albums/' + id).then((r) => r.json()).catch(() => {});
+        }
+        return seenAlbums[id];
+    }
+
     function applyAlbum(a) {
         const s = albumSpoof(idOf(a));
-        if (s && a.error) reviveAlbum(a);
+        const revived = !!(s && a.error);
+        if (revived) reviveAlbum(a);
         if (s) Object.assign(a, s);
+        if (!revived && a.title && !a.error && 'trackCount' in a) {
+            const keep = {};
+            for (const k of ['title', 'year', 'releaseDate', 'genre', 'artists', 'labels'])
+                if (a[k] !== undefined) keep[k] = a[k];
+            rememberSeenAlbum(String(idOf(a)), keep);
+        }
         // сингл: название, обложка и исполнители берутся из подмены его единственного трека
         if (Array.isArray(a.volumes) && a.volumes.length === 1 && a.volumes[0].length === 1) {
             const ts = getMeta().tracks[idOf(a.volumes[0][0])];
@@ -402,11 +504,24 @@
             Object.assign(t, s);
         }
         if (unblock) {
+            if (t.available === false || t.error) window.__fkcGhost.add(String(id));
             // недоступный трек с заменой — делаем доступным, звук подставит хук file-info
             t.available = true;
             delete t.error;
         }
         (t.artists || []).forEach(applyArtist);
+
+        // Трек из чужого альбома, вставленный базой в трек-лист другого альбома: в карточке
+        // трека остаётся его настоящий альбом, и ссылка «альбом трека» ведёт туда. Ведём в тот,
+        // куда его поставили
+        const movedTo = m.trackAlbums[id];
+        if (movedTo && Array.isArray(t.albums) && t.albums.length && !(Array.isArray(s.albums) && s.albums.length) &&
+            !t.albums.some((a) => String(idOf(a)) === String(movedTo))) {
+            const as = albumSpoof(movedTo) || {};
+            const pos = trackPositionIn(movedTo, id);
+            t.albums = [Object.assign({ title: '', available: true }, seenAlbum(String(movedTo)), as,
+                { id: Number(movedTo) }, pos ? { trackPosition: pos } : {})];
+        }
 
         if (Array.isArray(t.albums) && t.albums.length) {
             let spoofedAlbum = Array.isArray(s.albums) && s.albums.length > 0;
@@ -434,6 +549,17 @@
         // обложку, которую увидит клиент, запоминаем для истории F_ckCensor:
         // у удалённых треков публичный API обложки не отдаёт
         if (unblock && t.coverUri) window.__fkcCovers[id] = t.coverUri;
+    }
+
+    // Место трека в трек-листе альбома из базы: { volume, index }, с единицы, как у API
+    function trackPositionIn(albumId, trackId) {
+        const vols = (albumMeta(albumId) || {}).volumes;
+        if (!Array.isArray(vols)) return null;
+        for (let v = 0; v < vols.length; v++) {
+            const i = vols[v].findIndex((x) => String(x && typeof x === 'object' ? x.id : x) === String(trackId));
+            if (i >= 0) return { volume: v + 1, index: i + 1 };
+        }
+        return null;
     }
 
     function walk(v, depth) {
@@ -464,13 +590,33 @@
     // У них id из своего диапазона (у аддона FckCensor свой, около 5·10^14 — не пересекаемся).
     // Сервер о таких id не знает: в запросах к API их вырезаем, а данные трека добавляем
     // в ответ сами. Звук отдаёт тот же хук file-info, что и у своих подмен.
+    // Сразу за ними — свои треки из базы (их создают в админке): такие же, но общие для всех
     const CUSTOM_BASE = 600000000000000;
     const CUSTOM_LIMIT = 1000000;
+    const BASE_CUSTOM_BASE = CUSTOM_BASE + CUSTOM_LIMIT;
     const CUSTOM_SEQ = 'fkc-custom-seq';
 
     function isCustomId(id) {
         const n = Number(String(id).split(':')[0]);
-        return n >= CUSTOM_BASE && n < CUSTOM_BASE + CUSTOM_LIMIT;
+        return n >= CUSTOM_BASE && n < BASE_CUSTOM_BASE + CUSTOM_LIMIT;
+    }
+
+    // Свой трек из базы в том же виде, что и свой трек пользователя: название, исполнители
+    // и длительность — из записи трека, альбом — тот, в трек-лист которого он вставлен
+    function baseCustomTrack(id) {
+        if (Number(id) < BASE_CUSTOM_BASE || !getReplacementUrl(id)) return null;
+        const m = getMeta();
+        const t = m.tracks[id] || {};
+        const albumId = m.trackAlbums[id];
+        const al = (albumId && albumMeta(albumId)) || {};
+        const fc = al.__fckCensor || {};
+        // у удалённого альбома в записи может не быть названия — берём запомненное
+        const seen = (albumId && seenAlbums[albumId]) || {};
+        return {
+            custom: true, title: t.title, durationMs: t.durationMs, albumId,
+            albumTitle: seen.title, albumArtists: seen.artists || fc.trackArtists,
+            artists: t.artists || al.artists || seen.artists || fc.trackArtists || [],
+        };
     }
 
     function allocCustomId() {
@@ -483,8 +629,9 @@
 
     // Объект трека в том виде, в каком его отдаёт API
     function customTrackDto(id) {
-        const rec = (window.__fkcLocalTracks || {})[String(id)];
-        if (!rec || !rec.custom) return null;
+        const local = (window.__fkcLocalTracks || {})[String(id)];
+        const rec = local && local.custom ? local : baseCustomTrack(String(id));
+        if (!rec) return null;
         const al = (rec.albumId && albumMeta(rec.albumId)) || {};
         const cover = al.coverUri || rec.albumCover || '';
         const album = {
@@ -535,6 +682,44 @@
         return { rest, custom };
     }
 
+    // Свои треки, вырезанные из запроса, — в тело ответа. Именно в тело: клиент читает
+    // не сам ответ, а его копию (clone), и пометки на объекте ответа до неё не доходят
+    async function withCustomTracks(resp, custom, url, order) {
+        if (!resp.ok) return resp;
+        let text;
+        try { text = await resp.text(); } catch (_) { return resp; }
+        let data;
+        try { data = JSON.parse(text || '[]'); }
+        catch (_) { return new Response(text, { status: resp.status, headers: resp.headers }); }
+        const unwrapped = resultOf(data);
+        const list = Array.isArray(unwrapped) ? unwrapped : null;
+        if (list) {
+            // id — того же типа, что у остальных треков ответа: в одних ответах Яндекс отдаёт
+            // его числом, в других строкой, и клиент ищет трек по точному совпадению
+            const asString = list.some((x) => x && typeof x.id === 'string');
+            const dto = (id) => { const t = customTrackDto(id); if (t && asString) t.id = String(t.id); return t; };
+            if (Array.isArray(order) && order.length) {
+                // свой трек — на то место, где он был в запросе: клиент раскладывает ответ по порядку
+                const rest = list.slice();
+                const out = [];
+                for (const id of order) {
+                    if (custom.includes(id)) { const t = dto(id); if (t) out.push(t); continue; }
+                    const i = rest.findIndex((x) => x && String(x.id) === id);
+                    if (i >= 0) out.push(rest.splice(i, 1)[0]);
+                }
+                out.push(...rest); // что сервер вернул сверх запроса — как было, в конце
+                list.splice(0, list.length, ...out);
+            } else {
+                for (const id of custom) {
+                    if (list.some((x) => x && String(x.id) === String(id))) continue;
+                    const t = dto(id);
+                    if (t) list.push(t);
+                }
+            }
+        }
+        return fakeJsonResponse(resp.url || url, data, resp.status);
+    }
+
     // Ответ без сети: у Response нельзя задать url, поэтому ставим его свойством,
     // чтобы ответ прошёл через подмену метаданных как настоящий
     function fakeJsonResponse(url, body, status) {
@@ -543,14 +728,22 @@
         return r;
     }
 
-    const hasCustomTracks = () => Object.values(window.__fkcLocalTracks || {}).some((t) => t && t.custom);
+    // свои треки пользователя или из базы; база меняется редко — ответ про неё запоминаем
+    let baseCustomFor = null, baseCustomHas = false;
+    const hasCustomTracks = () => {
+        if (Object.values(window.__fkcLocalTracks || {}).some((t) => t && t.custom)) return true;
+        const r = window.__fkCensorReplacements;
+        if (r !== baseCustomFor) { baseCustomFor = r; baseCustomHas = Object.keys(r || {}).some((id) => Number(id) >= BASE_CUSTOM_BASE && isCustomId(id)); }
+        return baseCustomHas;
+    };
     const ID_FIELDS = ['trackIds', 'track-ids'];
 
     // Переписывает запрос к API, если в нём есть свои треки: id ищем в адресе (?track-ids=),
     // в пути (/tracks/{id}) и в теле — строке, URLSearchParams или FormData (так шлёт клиент).
     // Вернёт { input, init, custom, fake } — fake: готовый ответ без запроса к серверу
     async function rewriteCustomRequest(url, input, init, headers) {
-        const out = { input, init, custom: [], fake: null };
+        // order — все id запроса по порядку: клиент сопоставляет треки ответа с запросом по месту
+        const out = { input, init, custom: [], fake: null, order: [] };
         let u;
         try { u = new URL(url); } catch (_) { return out; }
         const raw = headers.has('x-yandex-music-without-invocation-info');
@@ -571,6 +764,7 @@
             const sp = splitCustomIds(q.split(','));
             if (sp.custom.length) {
                 out.custom = sp.custom;
+                out.order = q.split(',').map((x) => String(x).split(':')[0]);
                 if (!sp.rest.length) { out.fake = fakeJsonResponse(url, wrap([])); return out; }
                 u.searchParams.set('track-ids', sp.rest.join(','));
                 out.input = input instanceof Request ? new Request(u.toString(), input) : u.toString();
@@ -599,6 +793,7 @@
         for (const [k, v] of form.entries()) {
             if (!ID_FIELDS.includes(k) || typeof v !== 'string') { next.append(k, v); continue; }
             const sp = splitCustomIds(v.split(','));
+            v.split(',').forEach((x) => out.order.push(String(x).split(':')[0]));
             if (sp.custom.length) {
                 changed = true;
                 for (const id of sp.custom) if (!out.custom.includes(id)) out.custom.push(id);
@@ -643,6 +838,48 @@
                         for (const k of API_HEADERS) if (h.has(k)) keep[k] = h.get(k);
                         window.__fkcApiHeaders = keep;
                     }
+                    if (window.__fkCensorEnabled === true && url.split('?')[0] === API_PREFIX + 'collection/sync' && Object.values(window.__fkcLikes).some((l) => l && l.length)) {
+                        const self = this;
+                        return (async () => {
+                            let i2 = input, n2 = init;
+                            try {
+                                const isReq = input instanceof Request;
+                                const text = isReq ? await input.clone().text() : String((init && init.body) || '');
+                                const body = JSON.parse(text || '{}');
+                                if (body.likedTracks && body.likedTracks.revision != null) {
+                                    delete body.likedTracks.revision;
+                                    if (isReq) i2 = new Request(input, { body: JSON.stringify(body) });
+                                    else n2 = Object.assign({}, init, { body: JSON.stringify(body) });
+                                }
+                            } catch (_) {}
+                            return origFetch.call(self, i2, n2);
+                        })();
+                    }
+                    // Лайк трека, которого нет в Яндекс Музыке: Яндекс его не сохранит — запоминает программа
+                    if (window.__fkCensorEnabled === true && isLikeRequest(url)) {
+                        const self = this;
+                        return (async () => {
+                            let r = null;
+                            try { r = await handleLikeRequest(url, input, init, h); }
+                            catch (e) { console.error('[F_ckCensor] лайк:', e && e.message); }
+                            if (r && r.fake) return r.fake;
+                            return origFetch.call(self, r ? r.input : input, r ? r.init : init);
+                        })();
+                    }
+                    // Блок альбомов исполнителя, у которого своих альбомов нет: сервер отвечает 404.
+                    // Если в базе есть его альбомы — отдаём пустой блок, альбомы в него вставит подмена
+                    const ap = url.slice(API_PREFIX.length).split('?')[0].split('/');
+                    const ab = ap.length === 4 && ap[0] === 'artists' && ap[2] === 'blocks' && ap[3] === 'artist-albums' && isNum(ap[1]);
+                    if (window.__fkCensorEnabled === true && ab && insertionsFor(ap[1], 'albums').length) {
+                        const self = this;
+                        const raw = h.has('x-yandex-music-without-invocation-info');
+                        return (async () => {
+                            let resp = null;
+                            try { resp = await origFetch.call(self, input, init); } catch (_) {}
+                            if (resp && resp.ok) return resp;
+                            return fakeJsonResponse(url, raw ? { items: [] } : { invocationInfo: {}, result: { items: [] } });
+                        })();
+                    }
                     // свои треки — только если они вообще есть: разбор тела запроса не бесплатный
                     if (window.__fkCensorEnabled === true && hasCustomTracks()) {
                         const self = this;
@@ -650,10 +887,9 @@
                             let r = { input, init, custom: [], fake: null };
                             try { r = await rewriteCustomRequest(url, input, init, h); }
                             catch (e) { console.error('[F_ckCensor] свой трек в запросе:', e && e.message); }
-                            if (r.fake) { r.fake.__fkcCustom = r.custom; return r.fake; }
+                            if (r.fake) return r.custom.length ? withCustomTracks(r.fake, r.custom, url, r.order) : r.fake;
                             const resp = await origFetch.call(self, r.input, r.init);
-                            if (r.custom.length) resp.__fkcCustom = r.custom;
-                            return resp;
+                            return r.custom.length ? withCustomTracks(resp, r.custom, url, r.order) : resp;
                         })();
                     }
                 }
@@ -662,7 +898,9 @@
         };
     }
     function apiFetch(path, init) {
-        return fetch(API_PREFIX + path, Object.assign({}, init, { headers: Object.assign({}, window.__fkcApiHeaders || {}) }));
+        // заголовки авторизации клиента и, поверх, заголовки самого запроса (например, content-type)
+        const headers = Object.assign({}, window.__fkcApiHeaders || {}, init && init.headers);
+        return fetch(API_PREFIX + path, Object.assign({}, init, { headers }));
     }
 
     // API Яндекс Музыки отдаёт и удалённые треки; ответ тоже пройдёт через подмену
@@ -674,6 +912,12 @@
 
     async function fetchAlbums(ids) {
         if (!ids.length) return [];
+        // альбомы из базы без названия ни в записи, ни в запомненном: если Яндекс их удалил,
+        // название есть только в волне ответа with-tracks — берём его до запроса списка
+        // один раз на альбом: если волны с названием нет, повторный запрос ничего не даст
+        const untitled = ids.filter((id) => { const r = albumMeta(id); return r && !r.title && !(seenAlbums[id] && seenAlbums[id].title) && !albumAsked.has(id + '/wave'); });
+        untitled.forEach((id) => albumAsked.add(id + '/wave'));
+        await Promise.all(untitled.map((id) => apiFetch('albums/' + id + '/with-tracks').then((r) => r.json()).catch(() => {})));
         const r = await apiFetch('albums?album-ids=' + ids.join(','), { method: 'POST' });
         return ((await r.json()).result) || [];
     }
@@ -808,7 +1052,7 @@
     }
 
     async function artistAlbumBlock(artistId, data) {
-        const body = data && data.result && !Array.isArray(data.result) ? data.result : data;
+        const body = resultOf(data);
         const items = body && Array.isArray(body.items) ? body.items : null;
         if (!items) return;
         items.forEach(albumItemSpoof);
@@ -826,12 +1070,374 @@
         }
     }
 
+    // Страница исполнителя собирается по скелету (/artists/{id}/skeletons/...): список блоков,
+    // которые клиент потом загружает. У исполнителя без своих альбомов блока альбомов в нём нет —
+    // и альбомам из базы негде показаться. Ставим блок туда же, где он у остальных исполнителей
+    function ensureAlbumsBlock(artistId, data) {
+        if (!insertionsFor(artistId, 'albums').length) return;
+        const body = resultOf(data);
+        if (!body || !Array.isArray(body.blocks)) return;
+        let found = false;
+        const lists = [];
+        const scan = (blocks) => {
+            if (!Array.isArray(blocks)) return;
+            lists.push(blocks);
+            for (const b of blocks) {
+                if (!b || typeof b !== 'object') continue;
+                if (b.type === 'ARTIST_ALBUMS') found = true;
+                const d = b.data || {};
+                if (Array.isArray(d.tabs)) d.tabs.forEach((t) => scan(t && t.blocks));
+                scan(d.blocks);
+            }
+        };
+        scan(body.blocks);
+        if (found) return;
+        // список вкладки «Артист»: в нём лежат популярные треки и «Знакомое вам»
+        const list = lists.find((l) => l.some((b) => b && (b.type === 'ARTIST_POPULAR_TRACKS_AND_RELEASES' || b.type === 'FAMILIAR_YOU_AND_ARTIST_PICK'))) || lists[0];
+        const after = ['FAMILIAR_YOU_AND_ARTIST_PICK', 'ARTIST_POPULAR_TRACKS_AND_RELEASES']
+            .map((t) => list.findIndex((b) => b && b.type === t)).find((i) => i >= 0);
+        list.splice(after === undefined ? Math.min(1, list.length) : after + 1, 0, {
+            id: 'artist_albums',
+            type: 'ARTIST_ALBUMS',
+            data: {
+                title: 'Популярные альбомы',
+                showPolicy: 'SHOW_AND_LOAD',
+                viewAllAction: { deeplink: 'yandexmusic://artist/' + artistId + '/all/albums', weblink: '/artist/' + artistId + '/albums' },
+                source: { uri: '/artists/' + artistId + '/blocks/artist-albums', countWeb: 0, count: 0 },
+            },
+        });
+    }
+
+    // ---- Лайки треков, которых нет в Яндекс Музыке ----
+    // Свой трек Яндекс отклоняет (400) — такие лайки хранит программа. Лайк удалённого трека
+    // Яндекс хранит (он есть в collection/sync), но в плейлист «Мне нравится» его не кладёт.
+    // В «Мне нравится» подмешиваем и те и другие — по времени лайка, как обычные
+    const isGhostTrack = (id) => isCustomId(id);
+    const likeTime = () => new Date().toISOString().slice(0, 19) + '+00:00';
+    let likesRevision = 0; // последняя ревизия лайков от Яндекса — для ответа без сервера
+
+    function likePath(url) {
+        if (typeof url !== 'string' || !url.startsWith(API_PREFIX)) return null;
+        const p = url.slice(API_PREFIX.length).split('?')[0].split('/');
+        if (p[0] !== 'users' || p[2] !== 'likes' || p[3] !== 'tracks') return null;
+        // users/{uid}/likes/tracks/{add|add-multiple|remove}
+        if (p.length === 5 && ['add', 'add-multiple', 'remove'].includes(p[4])) return { uid: p[1], add: p[4] !== 'remove', id: '' };
+        // users/{uid}/likes/tracks/{id}/remove — так снимает лайк клиент
+        if (p.length === 6 && p[5] === 'remove') return { uid: p[1], add: false, id: decodeURIComponent(p[4]) };
+        return null;
+    }
+    const isLikeRequest = (url) => !!likePath(url);
+
+    // id «трек:альбом» из адреса и тела запроса лайка
+    async function likeEntries(url, input, init) {
+        const out = [];
+        const take = (v) => String(v || '').split(',').map((x) => x.trim()).filter(Boolean).forEach((x) => out.push(x));
+        try { const u = new URL(url); ['track-id', 'track-ids'].forEach((k) => take(u.searchParams.get(k))); } catch (_) {}
+        let body = init && init.body;
+        if (!body && input instanceof Request && input.method !== 'GET') {
+            try { body = await input.clone().text(); } catch (_) {}
+        }
+        let form = null;
+        if (body instanceof FormData || body instanceof URLSearchParams) form = body;
+        else if (typeof body === 'string' && body) form = new URLSearchParams(body);
+        if (form) ['track-id', 'track-ids', 'trackIds'].forEach((k) => form.getAll(k).forEach(take));
+        return out;
+    }
+
+    function applyLikeLocal(op) {
+        const list = (window.__fkcLikes[op.uid] || []).filter((x) => String(x.id) !== op.id);
+        if (op.op === 'add') list.unshift({ id: op.id, albumId: op.albumId, timestamp: op.timestamp });
+        window.__fkcLikes[op.uid] = list;
+        window.__fkcLikeOps.push(op);
+    }
+
+    async function handleLikeRequest(url, input, init, headers) {
+        const p = likePath(url);
+        const uid = p.uid, add = p.add;
+        window.__fkcUid = uid;
+        const entries = await likeEntries(url, input, init);
+        if (p.id) entries.push(p.id);
+        const ghosts = entries.filter((e) => isGhostTrack(e.split(':')[0]));
+        if (!ghosts.length) return null;
+        for (const e of ghosts) {
+            const [id, albumId] = e.split(':');
+            applyLikeLocal({ op: add ? 'add' : 'remove', uid, id, albumId: albumId || String(getMeta().trackAlbums[id] || ''), timestamp: likeTime() });
+        }
+        window.__fkcBadgesRefresh && window.__fkcBadgesRefresh();
+        // свои треки Яндексу не отправляем: он ответит ошибкой, и клиент снимет лайк
+        const rest = entries.filter((e) => !isCustomId(e.split(':')[0]));
+        if (!rest.length) {
+            const raw = headers.has('x-yandex-music-without-invocation-info');
+            likesRevision++;
+            return { fake: fakeJsonResponse(url, raw ? { revision: likesRevision } : { invocationInfo: {}, result: { revision: likesRevision } }) };
+        }
+        // вперемешку со своими — свои вырезаем (как в остальных запросах)
+        if (rest.length !== entries.length) {
+            const r = await rewriteCustomRequest(url, input, init, headers);
+            return { input: r.input, init: r.init };
+        }
+        return null;
+    }
+
+    // Подмешивает свои лайки в список «Мне нравится»: на место по времени, без повторов.
+    // Вернёт добавленные id
+    const likeMs = (ts) => { const n = Date.parse(ts); return isNaN(n) ? 0 : n; };
+    // uid своего аккаунта: свои лайки — только в свой плейлист «Мне нравится», не в чужой.
+    // Берём из account/status один раз; без связи — из адресов лайков, которые делал сам пользователь
+    let selfUidPromise = null;
+    function selfUid() {
+        if (window.__fkcSelfUid) return Promise.resolve(window.__fkcSelfUid);
+        if (!selfUidPromise) {
+            selfUidPromise = apiFetch('account/status').then((r) => r.json()).then((d) => {
+                const acc = (resultOf(d) || {}).account || {};
+                if (acc.uid) window.__fkcSelfUid = String(acc.uid);
+                return window.__fkcSelfUid || window.__fkcUid || '';
+            }).catch(() => window.__fkcUid || '').finally(() => { if (!window.__fkcSelfUid) selfUidPromise = null; });
+        }
+        return selfUidPromise;
+    }
+    function mergeLikes(uid, tracks, extra) {
+        const local = (window.__fkcLikes[String(uid)] || []).concat(extra || []);
+        if (!local.length || !Array.isArray(tracks)) return [];
+        const have = new Set(tracks.map((t) => String(t && t.id)));
+        const added = [];
+        for (const l of local) {
+            if (have.has(String(l.id))) continue;
+            have.add(String(l.id));
+            const entry = { id: Number(l.id), timestamp: l.timestamp };
+            if (l.albumId) entry.albumId = Number(l.albumId);
+            const ms = likeMs(l.timestamp);
+            let i = tracks.findIndex((t) => t && typeof t.timestamp === 'string' && likeMs(t.timestamp) < ms);
+            if (i < 0) i = tracks.length;
+            tracks.splice(i, 0, entry);
+            added.push(String(l.id));
+        }
+        if (added.length && tracks.some((t) => t && 'originalIndex' in t)) {
+            tracks.forEach((t, i) => { if (t) { t.originalIndex = i; t.originalShuffleIndex = i; } });
+        }
+        return added;
+    }
+
+    // Лайки удалённых треков: Яндекс их хранит (collection/sync), но в «Мне нравится» не кладёт.
+    // Возвращаем те, что подмена умеет играть. Список лайков запоминаем из ответов клиенту,
+    // а если клиент его ещё не запрашивал — запрашиваем сами
+    let serverLiked = null;
+    async function serverGhostLikes() {
+        if (!serverLiked) {
+            try {
+                const r = await apiFetch('collection/sync', { method: 'POST', body: JSON.stringify({ likedTracks: {} }), headers: { 'content-type': 'application/json' } });
+                rememberServerLikes(await r.json());
+            } catch (_) {}
+        }
+        return (serverLiked || []).filter((l) => !isCustomId(l.id) && getReplacementUrl(l.id));
+    }
+    function rememberServerLikes(data) {
+        const body = resultOf(data);
+        const lt = body && body.values && body.values.likedTracks;
+        const liked = lt && lt.values && lt.values.liked;
+        if (Array.isArray(liked)) serverLiked = liked.map((x) => ({ id: String(x.trackId), albumId: x.albumId ? String(x.albumId) : '', timestamp: x.timestamp }));
+        return lt;
+    }
+
+    // Блок «Мне нравится» на странице «Коллекция» (landing-blocks/collection/playlist-with-likes):
+    // первые count треков целиком и общий счётчик, без времени лайка. Время берём из списка
+    // лайков Яндекса, свои и удалённые треки ставим на место по нему
+    async function mergeLikesBlock(url, data) {
+        const body = resultOf(data);
+        if (!body || !Array.isArray(body.tracks)) return;
+        const uid = await selfUid();
+        const own = (uid && window.__fkcLikes[uid]) || [];
+        const ghosts = await serverGhostLikes();
+        const has = (id) => body.tracks.some((t) => t && String(idOf(t)) === String(id));
+        const extras = own.concat(ghosts).filter((l, i, all) => !has(l.id) && all.findIndex((x) => String(x.id) === String(l.id)) === i);
+        if (!extras.length) return;
+        let count = body.tracks.length;
+        try { count = Number(new URL(url).searchParams.get('count')) || count; } catch (_) {}
+
+        const timeOf = new Map((serverLiked || []).concat(own).map((l) => [String(l.id), likeMs(l.timestamp)]));
+        const rows = body.tracks.map((t) => ({ t, ms: timeOf.has(String(idOf(t))) ? timeOf.get(String(idOf(t))) : null }));
+        // в блок попадут только те, что новее последнего показанного трека (или блок неполный)
+        const lastMs = rows.reduce((m, r) => (r.ms != null ? Math.min(m, r.ms) : m), Infinity);
+        const fits = extras.filter((l) => rows.length < count || likeMs(l.timestamp) > lastMs);
+        const asString = body.tracks.some((t) => t && typeof t.id === 'string');
+        let dtos = [];
+        const real = fits.filter((l) => !isCustomId(l.id)).map((l) => l.albumId ? l.id + ':' + l.albumId : l.id);
+        if (real.length) { try { dtos = await fetchTracks(real); } catch (_) {} }
+        for (const l of fits.sort((a, b) => likeMs(b.timestamp) - likeMs(a.timestamp))) {
+            const t = isCustomId(l.id) ? customTrackDto(l.id) : dtos.find((d) => String(idOf(d)) === String(l.id));
+            if (!t) continue;
+            if (asString) t.id = String(t.id);
+            const ms = likeMs(l.timestamp);
+            let i = rows.findIndex((r) => r.ms != null && r.ms < ms);
+            if (i < 0) i = rows.length;
+            rows.splice(i, 0, { t, ms });
+        }
+        body.tracks.splice(0, body.tracks.length, ...rows.slice(0, count).map((r) => r.t));
+        // свои треки Яндекс не считает; удалённые в счётчике уже есть (лайк у него хранится)
+        const ownExtra = extras.filter((l) => isCustomId(l.id)).length;
+        if (body.summary && typeof body.summary.count === 'number') body.summary.count += ownExtra;
+    }
+
+    // ---- Поиск: удалённые и свои треки и альбомы из базы ----
+    // Яндекс их не находит — у него их нет. Индекс собираем один раз на версию списков:
+    // свои треки — из записи, удалённые треки альбомов базы — через API (названия и исполнители
+    // уже с подменой), альбомы — удалённые и созданные с нуля
+    const normText = (x) => String(x || '').toLowerCase().replace(/ё/g, 'е').replace(/[^0-9a-zа-я]+/g, ' ').trim();
+    let searchIndex = null, searchIndexFor = null, searchIndexBuilding = null;
+
+    async function buildSearchIndex() {
+        const m = getMeta();
+        const tracks = [], albums = [];
+        const ids = new Set();
+        for (const [albumId, al] of Object.entries(m.albums)) {
+            for (const vol of al.volumes || []) for (const x of vol) ids.add(String(idOf(x)));
+            ids.add('album:' + albumId);
+        }
+        const trackIds = [...ids].filter((x) => !x.startsWith('album:'));
+        // свои треки — сразу, удалённые — после ответа API (подмена отметит их как недоступные)
+        const real = trackIds.filter((id) => !isCustomId(id));
+        // пачки по 100 — параллельно, не больше четырёх разом
+        const chunks = [];
+        for (let i = 0; i < real.length; i += 100) chunks.push(real.slice(i, i + 100));
+        const dtoById = new Map();
+        for (let i = 0; i < chunks.length; i += 4) {
+            const got = await Promise.all(chunks.slice(i, i + 4).map((c) => fetchTracks(c).catch(() => [])));
+            for (const list of got) for (const d of list) if (d) dtoById.set(String(idOf(d)), d);
+        }
+        const artistsOf = (list) => (list || []).map((a) => a && a.name).filter(Boolean).join(', ');
+        for (const id of trackIds) {
+            const dto = isCustomId(id) ? customTrackDto(id) : dtoById.get(id);
+            // живой трек Яндекс найдёт сам — кроме переименованного базой: по новому названию не найдёт
+            const renamed = !!(m.tracks[id] && m.tracks[id].title);
+            if (!dto || (!isCustomId(id) && !window.__fkcGhost.has(id) && !renamed)) continue;
+            const title = dto.title || '';
+            tracks.push({ id, dto, key: normText(title + ' ' + artistsOf(dto.artists)), title: normText(title) });
+        }
+        const albumIds = Object.keys(m.albums);
+        let fetched = [];
+        try { fetched = await fetchAlbums(albumIds); } catch (_) {}
+        for (const a of fetched) {
+            const id = String(idOf(a));
+            if (!a || a.error || !goneAlbums.has(id)) continue;
+            albums.push({ id, dto: a, key: normText((a.title || '') + ' ' + artistsOf(a.artists)), title: normText(a.title) });
+        }
+        return { tracks, albums };
+    }
+
+    async function getSearchIndex() {
+        const m = getMeta();
+        if (searchIndex && searchIndexFor === m) return searchIndex;
+        if (!searchIndexBuilding) {
+            searchIndexBuilding = buildSearchIndex().then((ix) => { searchIndex = ix; searchIndexFor = m; return ix; })
+                .finally(() => { searchIndexBuilding = null; });
+        }
+        return searchIndexBuilding;
+    }
+
+    async function mergeSearch(url, data) {
+        const body = resultOf(data);
+        if (!body || !Array.isArray(body.results)) return;
+        let text = body.text || '', types = [];
+        try { const u = new URL(url); text = u.searchParams.get('text') || text; types = (u.searchParams.get('type') || '').split(','); } catch (_) {}
+        const words = normText(text).split(' ').filter(Boolean);
+        if (!words.length) return;
+        // первая страница; вкладка «Треки» или «Альбомы» — только свой тип
+        try { if (Number(new URL(url).searchParams.get('page') || 0) > 0) return; } catch (_) {}
+        const want = (t) => !types.length || !types[0] || types.includes(t);
+        const ix = await getSearchIndex();
+        const match = (e) => words.every((w) => e.key.includes(w));
+        // сначала точное совпадение названия, потом — начало названия
+        const score = (e) => (e.title === words.join(' ') ? 0 : e.title.startsWith(words.join(' ')) ? 1 : 2);
+        const have = (type, id) => body.results.some((r) => r && r.type === type && r[type] && String(idOf(r[type])) === id);
+        const add = [];
+        if (want('track')) for (const e of ix.tracks.filter(match).sort((a, b) => score(a) - score(b)).slice(0, 10)) {
+            if (have('track', e.id)) continue;
+            const t = Object.assign({}, e.dto);
+            if (body.results.some((r) => r && r.track && typeof r.track.id === 'string')) t.id = String(t.id);
+            add.push({ type: 'track', track: t });
+        }
+        if (want('album')) for (const e of ix.albums.filter(match).sort((a, b) => score(a) - score(b)).slice(0, 5)) {
+            if (!have('album', e.id)) add.push({ type: 'album', album: Object.assign({}, e.dto) });
+        }
+        if (!add.length) return;
+        // после лучшего результата Яндекса (на вкладке «Топ» он первый), иначе — в начало
+        const at = body.results.length && types.length > 1 ? 1 : 0;
+        body.results.splice(at, 0, ...add);
+    }
+
+    // плейлист «Мне нравится» (kind 3): трек-лист, счётчик и длительность
+    async function mergeLikedPlaylist(pl) {
+        if (!pl || pl.kind !== 3 || !Array.isArray(pl.tracks) || !pl.owner) return;
+        // чужой плейлист «Мне нравится» (открыли профиль друга) — свои лайки туда не подмешиваем
+        if (String(pl.owner.uid) !== await selfUid()) return;
+        if (typeof pl.revision === 'number') likesRevision = Math.max(likesRevision, pl.revision);
+        const added = mergeLikes(pl.owner.uid, pl.tracks, await serverGhostLikes());
+        if (!added.length) return;
+        if (typeof pl.trackCount === 'number') pl.trackCount += added.length;
+        // в «полном» ответе у записей есть сам трек — добавленным его тоже нужен
+        const rich = pl.tracks.some((t) => t && t.track);
+        let dtos = [];
+        if (rich) {
+            try { dtos = await fetchTracks(added); } catch (_) {}
+        }
+        for (const id of added) {
+            const e = pl.tracks.find((t) => t && String(t.id) === id);
+            const dto = (isCustomId(id) && customTrackDto(id)) || dtos.find((d) => String(idOf(d)) === id);
+            if (rich && e && dto) e.track = dto;
+            const dur = (dto && dto.durationMs) || (getMeta().tracks[id] || {}).durationMs || 0;
+            if (typeof pl.durationMs === 'number') pl.durationMs += dur;
+        }
+    }
+
+    // Аватарки исполнителей. В записи альбома из базы исполнители — только имя и id, и у удалённого
+    // или созданного с нуля альбома клиенту неоткуда взять аватарку (рядом с именем пусто).
+    // Недостающие берём одним запросом по id и запоминаем
+    const artistCovers = {};
+    const coverAsked = new Set();
+    async function fillArtistCovers(data) {
+        const need = [];
+        const lists = [];
+        const body = data && typeof data === 'object' ? data : null;
+        if (!body) return;
+        // сам альбом и его треки с исполнителями из базы (свои треки, подменённые исполнители)
+        const m = getMeta();
+        const owners = [body];
+        for (const t of (Array.isArray(body.volumes) ? body.volumes : []).flat()) {
+            const spoof = t && typeof t === 'object' ? m.tracks[idOf(t)] : null;
+            if (spoof && spoof.artists) owners.push(t);
+        }
+        for (const o of owners) {
+            if (!Array.isArray(o.artists) || !o.artists.length) continue;
+            lists.push(o.artists);
+            for (const a of o.artists) {
+                const id = a && a.id != null ? String(a.id) : '';
+                if (!id || (a.cover && a.cover.uri)) continue;
+                if (!artistCovers[id] && !coverAsked.has(id) && !need.includes(id)) need.push(id);
+            }
+        }
+        if (need.length) {
+            need.forEach((id) => coverAsked.add(id));
+            try {
+                const form = new URLSearchParams({ 'artist-ids': need.slice(0, 50).join(',') });
+                const r = await apiFetch('artists', { method: 'POST', body: form });
+                const list = ((await r.json()) || {}).result || [];
+                for (const a of list) if (a && a.cover && a.cover.uri) artistCovers[String(a.id)] = a.cover;
+            } catch (_) {}
+        }
+        for (const l of lists) {
+            for (const a of l) {
+                const c = a && artistCovers[String(a.id)];
+                if (c && !(a.cover && a.cover.uri)) a.cover = Object.assign({}, c);
+            }
+        }
+    }
+
     async function processApi(url, data) {
         const path = url.slice(API_PREFIX.length).split('?')[0].split('/').filter(Boolean);
         const [root, id, sub] = path;
         if (root === 'albums') {
             // ответ бывает в обёртке { result } (свои запросы) и без неё (запросы клиента)
-            const body = data && data.result !== undefined && !Array.isArray(data) ? data.result : data;
+            const body = resultOf(data);
             // альбомы-заглушки «not-found» оживляем до остального: у них нет даже названия
             if (isNum(id) && body && typeof body === 'object' && !Array.isArray(body) && body.error && body.id == null) body.id = Number(id);
             for (const a of Array.isArray(body) ? body : [body]) {
@@ -845,12 +1451,50 @@
                 } catch (_) {}
                 await applyAlbumVolumes(id, body, richHint);
             }
+            // у альбома из базы исполнители могут быть без аватарок
+            if (isNum(id)) {
+                walk(data, 0);
+                await fillArtistCovers(body);
+                return;
+            }
+        }
+        else if (root === 'playlist' || (root === 'users' && sub === 'playlists')) {
+            const body = resultOf(data);
+            for (const pl of Array.isArray(body) ? body : [body]) await mergeLikedPlaylist(pl);
+        }
+        else if (root === 'search') {
+            await mergeSearch(url, data);
+        }
+        else if (root === 'landing-blocks' && id === 'collection' && sub === 'playlist-with-likes') {
+            await mergeLikesBlock(url, data);
+        }
+        else if (root === 'collection' && id === 'sync') {
+            const lt = rememberServerLikes(data);
+            const liked = lt && lt.values && lt.values.liked;
+            const uid = await selfUid();
+            if (Array.isArray(liked) && uid) {
+                const have = new Set(liked.map((x) => String(x.trackId)));
+                for (const l of window.__fkcLikes[uid] || []) {
+                    if (have.has(String(l.id))) continue;
+                    liked.push({ trackId: String(l.id), albumId: l.albumId ? String(l.albumId) : undefined, timestamp: l.timestamp });
+                }
+                liked.sort((a, b) => likeMs(b.timestamp) - likeMs(a.timestamp));
+            }
+        }
+        else if (root === 'users' && sub === 'likes' && path[3] === 'tracks' && !path[4]) {
+            const body = resultOf(data);
+            const lib = body && body.library;
+            if (lib && Array.isArray(lib.tracks)) {
+                if (typeof lib.revision === 'number') likesRevision = Math.max(likesRevision, lib.revision);
+                if (String(id) === await selfUid()) mergeLikes(id, lib.tracks);
+            }
         }
         else if (root === 'artists' && isNum(id)) {
             if (sub === 'tracks') await insertArtistTracks(id, data);
             else if (sub === 'track-ids') insertArtistTrackIds(id, data);
             else if (sub === 'direct-albums' || sub === 'safe-direct-albums') await insertArtistAlbums(id, data, url);
             else if (sub === 'blocks' && path[3] === 'artist-albums') await artistAlbumBlock(id, data);
+            else if (sub === 'skeletons') ensureAlbumsBlock(id, data);
         }
         walk(data, 0);
     }
@@ -861,11 +1505,6 @@
             const data = await origJson.call(this);
             if (window.__fkCensorEnabled === true && typeof this.url === 'string' && this.url.startsWith(API_PREFIX)) {
                 try {
-                    // свои треки, вырезанные из запроса, добавляем в ответ
-                    if (this.__fkcCustom && this.__fkcCustom.length) {
-                        const list = Array.isArray(data) ? data : data && Array.isArray(data.result) ? data.result : null;
-                        if (list) for (const id of this.__fkcCustom) { const t = customTrackDto(id); if (t) list.push(t); }
-                    }
                     await processApi(this.url, data);
                 }
                 catch (e) { console.error('[F_ckCensor] подмена метаданных:', e && e.message); }
@@ -880,6 +1519,7 @@
     const SVG_NS = 'http://www.w3.org/2000/svg';
     const XLINK_NS = 'http://www.w3.org/1999/xlink';
     const BADGE_ATTR = 'data-fkc-badge';
+    // карандаш клиента — для пунктов меню «Подменить …»: это действие «изменить»
     const BADGE_ICON = '/icons/sprite.svg#edit_xxs';
 
     function isTrackSpoofed(id) {
@@ -912,10 +1552,16 @@
         } else {
             wrap.style.cssText = 'display:inline-flex;align-items:center;margin-left:6px;flex-shrink:0;opacity:.7';
         }
-        const use = document.createElementNS(SVG_NS, 'use');
-        use.setAttributeNS(XLINK_NS, 'xlink:href', BADGE_ICON);
-        use.setAttribute('href', BADGE_ICON);
-        svg.appendChild(use);
+        // звёздочка — та самая «*» из f*ck, знак запикивания; цвет — как у родных меток
+        svg.setAttribute('viewBox', '0 0 16 16');
+        svg.setAttribute('fill', 'none');
+        const path = document.createElementNS(SVG_NS, 'path');
+        path.setAttribute('d', 'M8 2.5v11M3.2 5.25l9.6 5.5M3.2 10.75l9.6-5.5');
+        path.setAttribute('stroke', 'currentColor');
+        path.setAttribute('stroke-width', '1.6');
+        path.setAttribute('stroke-linecap', 'round');
+        path.setAttribute('fill', 'none');
+        svg.appendChild(path);
         wrap.appendChild(svg);
         return wrap;
     }
@@ -1010,6 +1656,23 @@
         title.appendChild(makeBadge(label));
     }
 
+    // Значок альбома — в строке «исполнитель · год» под названием, после года
+    function updateHeaderMeta(meta, spoofed, label) {
+        let badge = meta.querySelector(':scope > [' + BADGE_ATTR + ']');
+        if (!spoofed) {
+            if (badge) badge.remove();
+            return;
+        }
+        if (!badge) badge = makeBadge(label);
+        badge.style.marginLeft = '6px';
+        badge.style.display = 'inline-flex';
+        badge.style.alignItems = 'center';
+        // строка — обычный текст, значок встаёт по базовой линии и торчит вверх: опускаем
+        // его к середине года (замерено в клиенте)
+        badge.style.verticalAlign = '-4px';
+        if (meta.lastElementChild !== badge) meta.appendChild(badge);
+    }
+
     function refreshBadges() {
         document.querySelectorAll('[class*="Meta_titleContainer__"]').forEach(updateTrackTitle);
 
@@ -1018,8 +1681,13 @@
         const enabled = window.__fkCensorEnabled === true;
         if (location.pathname.startsWith('/album')) {
             const albumId = params.get('albumId');
-            document.querySelectorAll('[class*="CommonAlbumPage_header__"] [class*="PageHeaderTitle_stickyTitle__"]')
-                .forEach((t) => updateHeaderTitle(t, enabled && !!albumMeta(albumId), 'Альбом был подменён F_ckCensor'));
+            const spoofed = enabled && !!albumMeta(albumId);
+            const header = document.querySelector('[class*="CommonAlbumPage_header__"]');
+            const meta = header && header.querySelector('[class*="PageHeaderAlbumMeta_meta__"]');
+            // у названия значка нет, когда есть строка с исполнителем — он стоит там
+            if (header) header.querySelectorAll('[class*="PageHeaderTitle_stickyTitle__"]')
+                .forEach((t) => updateHeaderTitle(t, spoofed && !meta, 'Альбом был подменён F_ckCensor'));
+            if (meta && !hasAddonBadge(header)) updateHeaderMeta(meta, spoofed, 'Альбом был подменён F_ckCensor');
         }
         if (location.pathname.startsWith('/artist')) {
             const artistId = params.get('artistId');
@@ -2397,7 +3065,14 @@
         const m = getMeta();
         const album = m.albums[m.trackAlbums[id]] || {};
         const cover = window.__fkcCovers[id] || (m.tracks[id] || {}).coverUri || album.coverUri || '';
-        window.__fkcEvents.push({ trackId: id, url, cover });
+        // название и исполнители — как их видит пользователь, с подменой: у своего трека
+        // их больше негде взять, а у подменённого Яндекс отдал бы зацензуренные
+        const dto = isCustomId(id) ? customTrackDto(id) : null;
+        const spoof = Object.assign({}, m.tracks[id], localTracks[id] && localTracks[id].title ? { title: localTracks[id].title } : null);
+        const title = (dto && dto.title) || spoof.title || '';
+        const artists = (dto && dto.artists) || spoof.artists || [];
+        const artist = artists.map((a) => a && a.name).filter(Boolean).join(', ');
+        window.__fkcEvents.push({ trackId: id, url, cover, title, artist });
     }
 
     function patchResource(proto) {
@@ -2523,13 +3198,14 @@
             wc.on('did-navigate-in-page', () => injectInto(wc));
         });
 
+        // Окна, открытые до установки перехвата: встраиваемся сейчас и после каждой перезагрузки —
+        // иначе перезагрузка окна (Ctrl+R, переход с полной загрузкой) снимает подмену
         webContents.getAllWebContents().forEach((wc) => {
+            if (wc.isDestroyed()) return;
             forwardConsole(wc);
-            if (!wc.isDestroyed() && !wc.isLoading()) {
-                injectInto(wc);
-            } else {
-                wc.on('did-finish-load', () => injectInto(wc));
-            }
+            wc.on('dom-ready', () => injectInto(wc));
+            wc.on('did-finish-load', () => injectInto(wc));
+            if (!wc.isLoading()) injectInto(wc);
         });
 
         log('webContents hook установлен');
@@ -2601,6 +3277,39 @@
         });
     }
 
+    // Лайки треков, которых нет в Яндекс Музыке: программа хранит их и присылает весь список,
+    // когда он меняется; окнам он нужен для «Мне нравится». Неотправленные лайки ждут связи
+    let appLikes = {};
+    let appLikesRev = 0;
+    const pendingLikeOps = [];
+
+    // Лайки для окна: подтверждённые программой плюс отправленные, но ещё не подтверждённые.
+    // Скрипт окна сверху доприменяет и свои, которые главный процесс ещё не забрал
+    function effectiveLikes() {
+        const out = JSON.parse(JSON.stringify(appLikes || {}));
+        for (const op of pendingLikeOps) {
+            const list = (out[op.uid] || []).filter((x) => String(x.id) !== String(op.id));
+            if (op.op === 'add') list.unshift({ id: op.id, albumId: op.albumId, timestamp: op.timestamp });
+            out[op.uid] = list;
+        }
+        return out;
+    }
+    function likesScript() {
+        return 'window.__fkcLikes = ' + JSON.stringify(effectiveLikes()) + ';' +
+            ' (window.__fkcLikeOps || []).forEach(function (op) {' +
+            ' var l = (window.__fkcLikes[op.uid] || []).filter(function (x) { return String(x.id) !== String(op.id); });' +
+            ' if (op.op === "add") l.unshift({ id: op.id, albumId: op.albumId, timestamp: op.timestamp });' +
+            ' window.__fkcLikes[op.uid] = l; });';
+    }
+
+    function pushLikes() {
+        const { webContents } = require('electron');
+        const script = likesScript();
+        webContents.getAllWebContents().forEach((wc) => {
+            if (!wc.isDestroyed()) wc.executeJavaScript(script).catch(() => {});
+        });
+    }
+
     async function takeFromRenderers() {
         const { webContents } = require('electron');
         const events = [];
@@ -2611,6 +3320,7 @@
                 const r = await wc.executeJavaScript('window.__fkcTake ? window.__fkcTake() : null');
                 if (!r) continue;
                 events.push(...(r.events || []));
+                pendingLikeOps.push(...(r.likeOps || []));
                 if (r.nowPlaying && !nowPlaying) nowPlaying = r.nowPlaying;
             } catch(_) {}
         }
@@ -2629,7 +3339,7 @@
             const local = String(e.url).startsWith('blob:');
             const ok = local || await checkUrl(e.url);
             if (!ok) reachable = false;
-            report.push({ type: ok ? 'replaced' : 'failed', trackId: e.trackId, cover: e.cover || '' });
+            report.push({ type: ok ? 'replaced' : 'failed', trackId: e.trackId, cover: e.cover || '', title: e.title || '', artist: e.artist || '' });
         }
 
         // После ошибки периодически проверяем, не ожило ли хранилище
@@ -2640,7 +3350,12 @@
         }
 
         try {
+            const likeOps = pendingLikeOps.slice();
             const res = await postToApp('/ym/sync', {
+                likeOps,
+                likesRev: appLikesRev,
+                listLoadedAt,
+                listLoadOk,
                 ymVersion: app.getVersion(),
                 listCount: Object.keys(replacements).length,
                 reachable,
@@ -2650,6 +3365,17 @@
             if (!syncOk) log('связь с F_ckCensor есть, подмена', res.enabled ? 'включена' : 'на паузе');
             syncOk = true;
             enabledByApp = res.enabled === true;
+            pendingLikeOps.splice(0, likeOps.length);
+            if (res.likes && typeof res.likesRev === 'number') {
+                appLikes = res.likes;
+                appLikesRev = res.likesRev;
+                pushLikes();
+            }
+            // в программе нажали «обновить список замен» — не ждём 10 минут
+            if (res.reloadList && res.reloadList > listLoadedAt && !listLoading) {
+                log('обновляю списки по просьбе F_ckCensor');
+                reloadLists(true);
+            }
         } catch(e) {
             if (syncOk !== false) log('нет связи с F_ckCensor:', e.message);
             syncOk = false;
@@ -2666,23 +3392,28 @@
         loop();
     }
 
-    function startSyncLoop() {
-        setInterval(() => {
-            loadList().then((updated) => {
-                if (!updated) return;
-                const { webContents } = require('electron');
-                const script = buildDataScript();
-                webContents.getAllWebContents().forEach((wc) => {
-                    if (!wc.isDestroyed()) {
-                        wc.executeJavaScript(script).catch(() => {});
-                    }
-                });
+    // загрузить списки и отдать их открытым окнам клиента
+    function reloadLists(fresh) {
+        return loadList(fresh).then((updated) => {
+            if (!updated) return;
+            const { webContents } = require('electron');
+            const script = buildDataScript();
+            webContents.getAllWebContents().forEach((wc) => {
+                if (!wc.isDestroyed()) {
+                    wc.executeJavaScript(script).catch(() => {});
+                }
             });
-        }, SYNC_MS);
+        });
+    }
+
+    function startSyncLoop() {
+        setInterval(() => { reloadLists(false); }, SYNC_MS);
     }
 
     function init() {
-        loadList().then(() => {
+        // первый обмен с программой — до встраивания в окно: так окно сразу получит лайки,
+        // которые хранит программа, и «Мне нравится» при запуске будет полным
+        loadList().then(() => appSyncOnce().catch(() => {})).then(() => {
             setupWebContentsHook();
             startSyncLoop();
             startAppSync();

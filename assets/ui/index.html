@@ -397,6 +397,7 @@ button:disabled{cursor:default;opacity:.5}
           <button class="btn" data-act="install" id="b-reinstall">переустановить</button>
           <button class="btn" data-act="remove" id="b-remove">удалить патч</button>
           <button class="btn" data-act="restartYM" id="b-restart">перезапустить яндекс музыку</button>
+          <button class="btn" data-act="reloadList" id="b-reload-list" title="яндекс музыка сама берёт свежий список замен раз в 10 минут — так сразу">обновить треки</button>
         </div>
       </div>
     </section>
@@ -508,6 +509,8 @@ function fmtTime(ms) {
 }
 
 const num = (n) => Number(n || 0).toLocaleString('ru-RU');
+const plural = (n, a, b, c) => { const m10 = n % 10, m100 = n % 100; return m10 === 1 && m100 !== 11 ? a : m10 >= 2 && m10 <= 4 && (m100 < 10 || m100 >= 20) ? b : c; };
+let wasReloading = false;
 
 function cover(src, size) {
   const st = `width:${size}px;height:${size}px;border-radius:${size > 40 ? 8 : 6}px`;
@@ -606,6 +609,12 @@ function render() {
   $('b-reinstall').textContent = s.patch === 'ok' ? 'переустановить' : 'установить';
   $('b-remove').disabled = busy || noym || s.patch === 'none';
   $('b-restart').disabled = busy || noym;
+  // список замен: яндекс музыка сама берёт свежий раз в 10 минут, кнопка — сразу
+  const reloading = !!s.listReloading;
+  if (wasReloading && !reloading) toast(s.listReloadError || `список замен обновлён: ${num(s.listCount)} ${plural(s.listCount, 'трек', 'трека', 'треков')}`);
+  wasReloading = reloading;
+  $('b-reload-list').disabled = reloading || !s.connected;
+  $('b-reload-list').textContent = reloading ? 'обновляем треки…' : 'обновить треки';
 
   // инфо
   if (!$('about-sub').dataset.ready) {

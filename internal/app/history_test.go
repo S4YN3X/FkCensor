@@ -53,3 +53,22 @@ func TestHistoryRecordsEveryTrack(t *testing.T) {
 		t.Fatalf("статистика: %+v (обычные треки в неё не идут)", st)
 	}
 }
+
+func TestHistoryCustomTrackTitle(t *testing.T) {
+	t.Setenv("LOCALAPPDATA", t.TempDir())
+	a := &App{store: store.Open(), listeners: map[int]func(){}, reachable: true}
+	// свой трек из базы: в Яндекс Музыке его нет, название и исполнитель — только от клиента
+	a.YMSync(ipc.SyncRequest{Events: []ipc.Event{{Type: "replaced", TrackID: "600000001000005", Title: "Рустем", Artist: "Валентин Стрыкало", Cover: "x.y/c/%%"}}})
+	hist := a.store.History()
+	if len(hist) != 1 || hist[0].Title != "Рустем" || hist[0].Artist != "Валентин Стрыкало" {
+		t.Fatalf("в истории своего трека — его название и исполнитель, а не id: %+v", hist)
+	}
+	// старый патч названия не присылает — хотя бы id, как раньше
+	a.YMSync(ipc.SyncRequest{Events: []ipc.Event{{Type: "replaced", TrackID: "600000001000006"}}})
+	if got := a.store.History()[0].Title; got != "трек 600000001000006" {
+		t.Errorf("без названия от клиента: %q", got)
+	}
+	if !isCustomTrackID("600000000000001") || !isCustomTrackID("600000001999999") || isCustomTrackID("110945082") {
+		t.Error("диапазон своих треков")
+	}
+}

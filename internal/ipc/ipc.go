@@ -16,6 +16,8 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	"github.com/S4YN3X/F_ckCensor/internal/store"
 )
 
 const tokenHeader = "X-FkCensor-Token"
@@ -36,6 +38,10 @@ type Event struct {
 	// Cover — обложка, которую показывает клиент (coverUri с %% вместо размера).
 	// Для удалённых треков её знает только подмена, публичный API её не отдаёт.
 	Cover string `json:"cover"`
+	// Title, Artist — как трек видит пользователь, с подменой. У своего трека (его нет
+	// в Яндекс Музыке) их знает только клиент.
+	Title  string `json:"title"`
+	Artist string `json:"artist"`
 }
 
 // SyncRequest — то, что скрипт в Яндекс Музыке присылает раз в пару секунд.
@@ -45,10 +51,25 @@ type SyncRequest struct {
 	Reachable  bool        `json:"reachable"`
 	NowPlaying *NowPlaying `json:"nowPlaying"`
 	Events     []Event     `json:"events"`
+	// ListLoadedAt — когда началась последняя загрузка списков замен, закончившаяся (unix мс)
+	ListLoadedAt int64 `json:"listLoadedAt"`
+	// ListLoadOk — удалось ли в ней скачать хоть один список (иначе играет прежний)
+	ListLoadOk bool `json:"listLoadOk"`
+	// LikeOps — лайки треков, которых нет в Яндекс Музыке (их хранит программа)
+	LikeOps []store.LikeOp `json:"likeOps,omitempty"`
+	// LikesRev — версия лайков, которая уже есть у клиента
+	LikesRev int64 `json:"likesRev"`
 }
 
 type SyncResponse struct {
 	Enabled bool `json:"enabled"`
+	// ReloadList — когда пользователь попросил обновить списки (unix мс): если клиент
+	// загружал их раньше, он загружает их заново, не дожидаясь своего расписания
+	ReloadList int64 `json:"reloadList,omitempty"`
+	// Likes — лайки по uid аккаунта, если у клиента устаревшая версия; иначе null.
+	// Без omitempty: пустой список ({}) — тоже новость, «последний лайк сняли»
+	Likes    map[string][]store.Like `json:"likes"`
+	LikesRev int64                   `json:"likesRev"`
 }
 
 type Handler interface {

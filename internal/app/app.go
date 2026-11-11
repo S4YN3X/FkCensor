@@ -5,6 +5,7 @@ package app
 import (
 	"fmt"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -38,6 +39,7 @@ type App struct {
 	Version string
 
 	store  *store.Store
+	likes  *store.Likes
 	script string
 
 	mu         sync.Mutex
@@ -54,7 +56,11 @@ type App struct {
 	nowPlaying *ipc.NowPlaying
 	// lastPlayed — последний трек, записанный в историю по «сейчас играет»
 	lastPlayed string
-	update     UpdateInfo
+	// listReload — когда попросили обновить списки замен (ноль — не просили или уже обновлены)
+	listReload time.Time
+	// listReloadErr — чем закончилось последнее обновление по просьбе: пусто — получилось
+	listReloadErr string
+	update        UpdateInfo
 	// обновление при запуске: состояние для заставки и отмена скачивания
 	startup       StartupUpdate
 	startupTaken  bool
@@ -74,7 +80,7 @@ type App struct {
 // New создаёт программу. launch — как она запущена: от этого зависит, где проверять
 // обновление — на заставке окна, в фоне (автозапуск в трей) или не проверять (сразу после обновления).
 func New(version, script string, st *store.Store, launch Launch) *App {
-	a := &App{Version: version, script: script, store: st, listeners: map[int]func(){}, reachable: true}
+	a := &App{Version: version, script: script, store: st, likes: store.OpenLikes(), listeners: map[int]func(){}, reachable: true}
 	if t := st.LastUpdateCheck(); !t.IsZero() {
 		a.update.Checked = t.UnixMilli()
 	}
@@ -393,6 +399,22 @@ func (a *App) YMSync(req ipc.SyncRequest) ipc.SyncResponse {
 	}
 	a.listCount = req.ListCount
 	a.reachable = req.Reachable
+	// клиент загрузил списки после просьбы — обновление закончено
+	reloaded := false
+	if !a.listReload.IsZero() && req.ListLoadedAt >= a.listReload.UnixMilli() {
+		a.listReload, reloaded = time.Time{}, true
+		a.listReloadErr = ""
+		if !req.ListLoadOk {
+			a.listReloadErr = errListNotLoaded
+		}
+	} else if !a.listReload.IsZero() && time.Since(a.listReload) > listReloadTimeout {
+		// клиент старый или не ответил — не держим кнопку, но и «обновлено» не говорим
+		a.listReload, reloaded, a.listReloadErr = time.Time{}, true, errListNoAnswer
+	}
+	reloadAt := int64(0)
+	if !a.listReload.IsZero() {
+		reloadAt = a.listReload.UnixMilli()
+	}
 	npChanged := !samePlaying(a.nowPlaying, req.NowPlaying)
 	a.nowPlaying = req.NowPlaying
 	a.mu.Unlock()
@@ -410,10 +432,56 @@ func (a *App) YMSync(req ipc.SyncRequest) ipc.SyncResponse {
 			a.recordPlay(*np)
 		}
 	}
-	if !wasConnected || npChanged || len(req.Events) > 0 {
+	if !wasConnected || npChanged || len(req.Events) > 0 || reloaded {
 		a.changed()
 	}
-	return ipc.SyncResponse{Enabled: a.store.Settings().Enabled}
+	res := ipc.SyncResponse{Enabled: a.store.Settings().Enabled, ReloadList: reloadAt}
+	// лайки треков, которых нет в Яндекс Музыке: сохраняем и отдаём клиенту, если у него старые
+	if a.likes != nil {
+		a.likes.Apply(req.LikeOps)
+		all, rev := a.likes.All()
+		res.LikesRev = rev
+		if rev != req.LikesRev {
+			if all == nil {
+				all = map[string][]store.Like{}
+			}
+			res.Likes = all // и пустой: клиент должен узнать, что лайков не осталось
+		}
+	}
+	return res
+}
+
+// reloadError — итог обновления для окна: если клиент так и не ответил (обмена нет),
+// просьба висит дольше срока — это тоже ошибка
+func reloadError(started time.Time, err string) string {
+	if !started.IsZero() && time.Since(started) >= listReloadTimeout {
+		return errListNoAnswer
+	}
+	return err
+}
+
+// listReloadTimeout — сколько ждать, пока клиент обновит списки по просьбе
+const listReloadTimeout = 30 * time.Second
+
+const (
+	errListNotLoaded = "не удалось скачать список замен — проверьте интернет (если github заблокирован, включите vpn)"
+	errListNoAnswer  = "яндекс музыка не ответила — обновите патч или перезапустите её"
+)
+
+// ReloadList просит Яндекс Музыку сразу загрузить свежие списки замен (обычно она делает это
+// раз в 10 минут). Клиент узнает о просьбе при следующем обмене — через пару секунд.
+func (a *App) ReloadList() error {
+	a.mu.Lock()
+	connected := time.Since(a.lastSync) < connectedTimeout
+	if connected {
+		a.listReload, a.listReloadErr = time.Now(), ""
+	}
+	a.mu.Unlock()
+	if !connected {
+		return fmt.Errorf("яндекс музыка не запущена — свежий список она загрузит сама при запуске")
+	}
+	a.changed()
+	return nil
 }
 
 func samePlaying(x, y *ipc.NowPlaying) bool {
@@ -428,8 +496,16 @@ func (a *App) handleEvent(e ipc.Event) {
 		return
 	}
 	failed := e.Type == "failed"
-	entry := store.Entry{TrackID: e.TrackID, Title: "трек " + e.TrackID, Cover: coverURL(e.Cover), Time: time.Now(), Failed: failed}
+	title := e.Title
+	if title == "" {
+		title = "трек " + e.TrackID
+	}
+	entry := store.Entry{TrackID: e.TrackID, Title: title, Artist: e.Artist, Cover: coverURL(e.Cover), Time: time.Now(), Failed: failed}
 	a.store.Record(entry)
+	// всё уже известно от клиента, а своего трека в Яндекс Музыке и нет
+	if isCustomTrackID(e.TrackID) || (e.Title != "" && e.Artist != "" && entry.Cover != "") {
+		return
+	}
 
 	go func() {
 		meta, err := fetchTrack(e.TrackID)
@@ -437,20 +513,33 @@ func (a *App) handleEvent(e ipc.Event) {
 			if meta.Cover == "" {
 				meta.Cover = entry.Cover // удалённый трек: обложка есть только у подмены в клиенте
 			}
+			// название и исполнители из клиента — с подменой, их не перетираем
+			if e.Title != "" {
+				meta.Title = e.Title
+			}
+			if e.Artist != "" {
+				meta.Artist = e.Artist
+			}
 			a.store.UpdateEntry(entry.TrackID, entry.Time, func(x *store.Entry) {
 				x.Title, x.Artist, x.Cover = meta.Title, meta.Artist, meta.Cover
 			})
-			entry.Title, entry.Artist = meta.Title, meta.Artist
 			a.changed()
 		}
 	}()
+}
+
+// isCustomTrackID — свой трек (его нет в Яндекс Музыке): пользователя или из базы.
+// Диапазон — как CUSTOM_BASE в assets/inject.js: 600000000000000 и два миллиона следом.
+func isCustomTrackID(id string) bool {
+	n, err := strconv.ParseInt(id, 10, 64)
+	return err == nil && n >= 600000000000000 && n < 600000002000000
 }
 
 // recordPlay записывает в историю начавшийся трек: подменённый — как замену
 // (повторное воспроизведение без нового запроса файла), остальные — «без замены».
 func (a *App) recordPlay(np ipc.NowPlaying) {
 	if np.Replaced {
-		a.handleEvent(ipc.Event{Type: "replaced", TrackID: np.TrackID})
+		a.handleEvent(ipc.Event{Type: "replaced", TrackID: np.TrackID, Title: np.Title, Artist: np.Artist, Cover: np.Artwork})
 		return
 	}
 	if a.store.RecentlyRecorded(np.TrackID, dedupeWindow, true) {
@@ -479,25 +568,29 @@ type NowPlayingView struct {
 }
 
 type State struct {
-	Version    string          `json:"version"`
-	GoVersion  string          `json:"goVersion"`
-	Arch       string          `json:"arch"`
-	RepoURL    string          `json:"repoUrl"`
-	YMDir      string          `json:"ymDir"`
-	YMVersion  string          `json:"ymVersion"`
-	Patch      Patch           `json:"patch"`
-	Connected  bool            `json:"connected"`
-	Enabled    bool            `json:"enabled"`
-	Busy       string          `json:"busy"`
-	Error      string          `json:"error"`
-	ListCount  int             `json:"listCount"`
-	Reachable  bool            `json:"reachable"`
-	NowPlaying *NowPlayingView `json:"nowPlaying"`
-	Stats      store.Stats     `json:"stats"`
-	History    []HistoryItem   `json:"history"`
-	Settings   store.Settings  `json:"settings"`
-	Update     UpdateInfo      `json:"update"`
-	Startup    StartupUpdate   `json:"startup"`
+	Version   string `json:"version"`
+	GoVersion string `json:"goVersion"`
+	Arch      string `json:"arch"`
+	RepoURL   string `json:"repoUrl"`
+	YMDir     string `json:"ymDir"`
+	YMVersion string `json:"ymVersion"`
+	Patch     Patch  `json:"patch"`
+	Connected bool   `json:"connected"`
+	Enabled   bool   `json:"enabled"`
+	Busy      string `json:"busy"`
+	Error     string `json:"error"`
+	ListCount int    `json:"listCount"`
+	// ListReloading — Яндекс Музыка загружает свежие списки по просьбе пользователя
+	ListReloading bool `json:"listReloading"`
+	// ListReloadError — почему последнее обновление списка не удалось (пусто — удалось)
+	ListReloadError string          `json:"listReloadError"`
+	Reachable       bool            `json:"reachable"`
+	NowPlaying      *NowPlayingView `json:"nowPlaying"`
+	Stats           store.Stats     `json:"stats"`
+	History         []HistoryItem   `json:"history"`
+	Settings        store.Settings  `json:"settings"`
+	Update          UpdateInfo      `json:"update"`
+	Startup         StartupUpdate   `json:"startup"`
 }
 
 func (a *App) Snapshot() State {
@@ -506,23 +599,25 @@ func (a *App) Snapshot() State {
 
 	a.mu.Lock()
 	st := State{
-		Version:   a.Version,
-		GoVersion: strings.TrimPrefix(runtime.Version(), "go"),
-		Arch:      runtime.GOARCH,
-		RepoURL:   RepoURL,
-		YMDir:     a.ymDir,
-		YMVersion: a.ymVersion,
-		Patch:     a.patch,
-		Connected: time.Since(a.lastSync) < connectedTimeout,
-		Enabled:   s.Enabled,
-		Busy:      a.busy,
-		Error:     a.lastErr,
-		ListCount: a.listCount,
-		Reachable: a.reachable,
-		Stats:     a.store.Stats(),
-		Settings:  s,
-		Update:    a.update,
-		Startup:   a.startup,
+		Version:         a.Version,
+		GoVersion:       strings.TrimPrefix(runtime.Version(), "go"),
+		Arch:            runtime.GOARCH,
+		RepoURL:         RepoURL,
+		YMDir:           a.ymDir,
+		YMVersion:       a.ymVersion,
+		Patch:           a.patch,
+		Connected:       time.Since(a.lastSync) < connectedTimeout,
+		Enabled:         s.Enabled,
+		Busy:            a.busy,
+		Error:           a.lastErr,
+		ListCount:       a.listCount,
+		Reachable:       a.reachable,
+		ListReloading:   !a.listReload.IsZero() && time.Since(a.listReload) < listReloadTimeout,
+		ListReloadError: reloadError(a.listReload, a.listReloadErr),
+		Stats:           a.store.Stats(),
+		Settings:        s,
+		Update:          a.update,
+		Startup:         a.startup,
 	}
 	if np := a.nowPlaying; np != nil && st.Connected {
 		st.NowPlaying = &NowPlayingView{NowPlaying: *np, Replaced: np.Replaced || playingReplaced(np, hist)}

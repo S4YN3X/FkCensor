@@ -290,6 +290,8 @@ func (w *Window) action(name string, arg json.RawMessage) error {
 				winutil.ScaleWindow(hwnd, after/before)
 			}
 		}
+	case "reloadList":
+		return w.app.ReloadList()
 	case "clearHistory":
 		w.app.ClearHistory()
 	case "checkUpdate":
