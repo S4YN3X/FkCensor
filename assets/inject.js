@@ -2,11 +2,11 @@
 ;(function() {
     'use strict';
 
-    // Списки замен в формате list_v2.json. При совпадении id важнее тот, что выше:
-    // свой репозиторий позволяет добавлять треки и поправлять замены из общей базы.
+    // Список замен в формате list_v2.json — один, в организации fcensor-data: в нём и свои замены,
+    // и всё из FckCensorData; звук разложен по репозиториям FkCensorData_NN (хранилища списка).
+    // Два списка программа сводила сама, и расхождения между ними давали ошибки
     const LISTS = [
-        { name: 'FkCensorData', url: 'https://raw.githubusercontent.com/S4YN3X/FkCensorData/refs/heads/main/list_v2.json' },
-        { name: 'FckCensorData', url: 'https://raw.githubusercontent.com/Hazzz895/FckCensorData/refs/heads/main/list_v2.json' },
+        { name: 'FkCensorData', url: 'https://raw.githubusercontent.com/fcensor-data/FkCensorData/refs/heads/main/list_v2.json' },
     ];
     const SYNC_MS  = 10 * 60 * 1000;
     const APP_SYNC_MS = 2000;        // обмен с программой F_ckCensor
@@ -210,11 +210,58 @@
     // Последний удачно загруженный вариант каждого списка: сбой одного не стирает его треки
     const loadedLists = {};
 
-    // fresh — в обход кэша GitHub: свежий коммит иначе виден не сразу, а через несколько минут
-    function fetchList(list, fresh) {
+    // GET через сеть Electron: { status, body, etag }
+    function netGet(url, headers) {
+        return new Promise((resolve, reject) => {
+            const req = require('electron').net.request({ url, cache: 'no-store' });
+            for (const [k, v] of Object.entries(headers || {})) req.setHeader(k, v);
+            const chunks = [];
+            req.on('response', (res) => {
+                res.on('data', (c) => chunks.push(c));
+                res.on('end', () => {
+                    const et = res.headers.etag;
+                    resolve({ status: res.statusCode, body: Buffer.concat(chunks).toString('utf8'), etag: Array.isArray(et) ? et[0] : et });
+                });
+            });
+            req.on('error', reject);
+            req.end();
+        });
+    }
+
+    // Список на GitHub: raw.githubusercontent.com/<владелец>/<репозиторий>/refs/heads/<ветка>/<путь>.
+    // Адрес ветки GitHub ещё несколько минут после коммита отдаёт прежний файл — даже с меткой
+    // против кэша. Поэтому спрашиваем последний коммит ветки (повтор с прежним ETag отвечает 304
+    // и не тратит лимит API) и берём список этого коммита: такой адрес всегда отдаёт нужную версию
+    const listShas = {};
+    function githubParts(url) {
+        const p = url.split('://').pop().split('/');
+        if (p[0] !== 'raw.githubusercontent.com' || p[3] !== 'refs' || p[4] !== 'heads' || p.length < 7) return null;
+        return { owner: p[1], repo: p[2], branch: p[5], path: p.slice(6).join('/') };
+    }
+    async function listUrlAtHead(list) {
+        const g = githubParts(list.url);
+        if (!g) return null;
+        const known = listShas[list.url];
+        const headers = { Accept: 'application/vnd.github.sha', 'User-Agent': 'F_ckCensor' };
+        if (known) headers['If-None-Match'] = known.etag;
+        try {
+            const r = await netGet('https://api.github.com/repos/' + g.owner + '/' + g.repo + '/commits/' + g.branch, headers);
+            if (r.status === 200 && /^[0-9a-f]{40}$/.test(r.body.trim())) {
+                listShas[list.url] = { sha: r.body.trim(), etag: r.etag || '"' + r.body.trim() + '"' };
+            } else if (r.status !== 304) {
+                return null; // лимит API или сбой — возьмём по адресу ветки
+            }
+        } catch (_) { return known ? 'https://raw.githubusercontent.com/' + g.owner + '/' + g.repo + '/' + known.sha + '/' + g.path : null; }
+        const sha = listShas[list.url] && listShas[list.url].sha;
+        return sha ? 'https://raw.githubusercontent.com/' + g.owner + '/' + g.repo + '/' + sha + '/' + g.path : null;
+    }
+
+    // fresh — в обход кэша GitHub, если не вышло узнать последний коммит
+    async function fetchList(list, fresh) {
+        const atHead = await listUrlAtHead(list);
         return new Promise((resolve) => {
             try {
-                const url = fresh ? list.url + (list.url.includes('?') ? '&' : '?') + 't=' + Date.now() : list.url;
+                const url = atHead || (fresh ? list.url + (list.url.includes('?') ? '&' : '?') + 't=' + Date.now() : list.url);
                 const req = require('electron').net.request(url);
                 const chunks = [];
                 req.on('response', (res) => {
@@ -285,7 +332,8 @@
             }
             loadedLists[l.name] = p;
             updated = true;
-            log(l.name + ': треков', count, '· подмен метаданных', Object.keys(p.meta.tracks).length);
+            const at = listShas[l.url];
+            log(l.name + ': треков', count, '· подмен метаданных', Object.keys(p.meta.tracks).length, at ? '· коммит ' + at.sha.slice(0, 7) : '· по адресу ветки');
         });
         if (!updated) return false;
 
@@ -510,6 +558,12 @@
             delete t.error;
         }
         (t.artists || []).forEach(applyArtist);
+        // текст песни из базы: кнопка текста и синхронный текст в плеере
+        const lyr = lyricsOf(id);
+        if (lyr) {
+            t.lyricsInfo = { hasAvailableTextLyrics: true, hasAvailableSyncLyrics: lyr.sync };
+            t.lyricsAvailable = true;
+        }
 
         // Трек из чужого альбома, вставленный базой в трек-лист другого альбома: в карточке
         // трека остаётся его настоящий альбом, и ссылка «альбом трека» ведёт туда. Ведём в тот,
@@ -627,6 +681,53 @@
         return String(CUSTOM_BASE + n);
     }
 
+    // ---- Тексты песен из базы ----
+    // В списке: tracks[id].__fckCensor.lyrics — ссылка на файл .lrc (синхронный текст) или .txt.
+    // Клиент спрашивает tracks/{id}/lyrics?format=TEXT|LRC и скачивает текст по downloadUrl —
+    // отвечаем сами, а текст отдаём data:-адресом (для TEXT из .lrc — без отметок времени)
+    function lyricsOf(id) {
+        const raw = getMeta().tracks[String(id)];
+        const url = raw && raw.__fckCensor && raw.__fckCensor.lyrics;
+        if (typeof url !== 'string' || !url) return null;
+        const full = url.includes('://') ? url : 'https://' + url;
+        return { url: full, sync: full.split('?')[0].toLowerCase().endsWith('.lrc') };
+    }
+    const lyricsCache = new Map();
+    function lyricsText(url) {
+        if (!lyricsCache.has(url)) {
+            const p = fetch(url).then((r) => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.text(); });
+            p.catch(() => lyricsCache.delete(url));
+            lyricsCache.set(url, p);
+        }
+        return lyricsCache.get(url);
+    }
+    // обычный текст из .lrc: без отметок времени [00:12.34] и служебных строк [ar: …]
+    function lrcToText(lrc) {
+        const out = [];
+        for (const raw of String(lrc).split(String.fromCharCode(10))) {
+            let line = raw.trim();
+            let tagged = false;
+            while (line.startsWith('[') && line.includes(']')) { line = line.slice(line.indexOf(']') + 1).trim(); tagged = true; }
+            if (tagged && !line && raw.includes(':') && !/[0-9]:[0-9]/.test(raw)) continue; // служебная строка
+            out.push(line);
+        }
+        return out.join(String.fromCharCode(10)).trim();
+    }
+    async function lyricsResponse(url, id, raw) {
+        const lyr = lyricsOf(id);
+        let format = 'TEXT';
+        try { format = new URL(url).searchParams.get('format') || 'TEXT'; } catch (_) {}
+        const text = await lyricsText(lyr.url);
+        const body = format === 'LRC' ? text : (lyr.sync ? lrcToText(text) : text);
+        const res = {
+            downloadUrl: 'data:text/plain;charset=utf-8,' + encodeURIComponent(body),
+            // lyricId 0 — клиент не шлёт Яндексу просмотр текста, которого у Яндекса нет
+            lyricId: 0, externalLyricId: '', writers: [],
+            major: { id: 0, name: 'F_ckCensor', prettyName: 'F_ckCensor' },
+        };
+        return fakeJsonResponse(url, raw ? res : { invocationInfo: {}, result: res });
+    }
+
     // Объект трека в том виде, в каком его отдаёт API
     function customTrackDto(id) {
         const local = (window.__fkcLocalTracks || {})[String(id)];
@@ -663,7 +764,8 @@
             albums: [album],
             coverUri: cover,
             ogImage: cover,
-            lyricsAvailable: false,
+            lyricsAvailable: !!lyricsOf(id),
+            lyricsInfo: { hasAvailableTextLyrics: !!lyricsOf(id), hasAvailableSyncLyrics: !!(lyricsOf(id) || {}).sync },
             type: 'music',
             rememberPosition: false,
             trackSharingFlag: 'COVER_ONLY',
@@ -865,6 +967,16 @@
                             if (r && r.fake) return r.fake;
                             return origFetch.call(self, r ? r.input : input, r ? r.init : init);
                         })();
+                    }
+                    // Текст песни из базы — отвечаем сами
+                    const lp = url.slice(API_PREFIX.length).split('?')[0].split('/');
+                    if (window.__fkCensorEnabled === true && lp.length === 3 && lp[0] === 'tracks' && lp[2] === 'lyrics' && lyricsOf(lp[1])) {
+                        const self = this;
+                        const raw = h.has('x-yandex-music-without-invocation-info');
+                        return lyricsResponse(url, lp[1], raw).catch((e) => {
+                            console.error('[F_ckCensor] текст песни:', e && e.message);
+                            return origFetch.call(self, input, init);
+                        });
                     }
                     // Блок альбомов исполнителя, у которого своих альбомов нет: сервер отвечает 404.
                     // Если в базе есть его альбомы — отдаём пустой блок, альбомы в него вставит подмена
@@ -3413,7 +3525,8 @@
     function init() {
         // первый обмен с программой — до встраивания в окно: так окно сразу получит лайки,
         // которые хранит программа, и «Мне нравится» при запуске будет полным
-        loadList().then(() => appSyncOnce().catch(() => {})).then(() => {
+        // при запуске — в обход кэша CDN: иначе до 5 минут после публикации приходит прежний список
+        loadList(true).then(() => appSyncOnce().catch(() => {})).then(() => {
             setupWebContentsHook();
             startSyncLoop();
             startAppSync();
