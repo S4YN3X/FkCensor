@@ -1826,7 +1826,7 @@
             // Свои значки не перезапускают обход
             // Пункт «Подменить трек» нужен сразу, пока меню открыто
             if (mutations.some((mu) => mu.addedNodes.length)) {
-                try { injectTrackMenus(); injectAlbumMenus(); } catch (e) { console.error('[F_ckCensor] меню:', e && e.message); }
+                try { injectTrackMenus(); injectAlbumMenus(); injectPlaylistMenus(); injectUncensoredButton(); } catch (e) { console.error('[F_ckCensor] меню:', e && e.message); }
             }
             if (mutations.every((mu) => [...mu.addedNodes, ...mu.removedNodes].every((n) => n.nodeType === 1 && n.hasAttribute && n.hasAttribute(BADGE_ATTR)) && mu.type === 'childList')) return;
             scheduleBadges();
@@ -2035,6 +2035,11 @@
         '.fkc-primary{background:var(--ym-controls-color-primary-default-enabled,#ff0);color:var(--ym-controls-color-primary-on_default-enabled,#000)}',
         '.fkc-primary:hover{background:var(--ym-controls-color-primary-default-hovered,#dada0b)}',
         '.fkc-wide{width:280px}',
+        '.fkc-narrow{width:min(420px,calc(100vw - 48px))}',
+        '.fkc-text{text-align:left;font-size:14px;line-height:1.45;color:var(--ym-controls-color-secondary-text-enabled,rgba(255,255,255,.6))}',
+        '.fkc-text b{color:var(--ym-controls-color-secondary-on_default-enabled,#fff);font-weight:600}',
+        '.fkc-pair{display:flex;gap:10px;margin-top:4px}',
+        '.fkc-pair .fkc-btn{flex:1}',
         '.fkc-secondary{background:var(--ym-controls-color-secondary-default-enabled,rgba(255,255,255,.08));color:var(--ym-controls-color-secondary-on_default-enabled,#e6e6e6)}',
         '.fkc-secondary:hover{background:var(--ym-controls-color-secondary-default-hovered,rgba(255,255,255,.12))}',
         '.fkc-btn:disabled{cursor:default;background:var(--ym-controls-color-primary-default-disabled,#333);color:var(--ym-controls-color-primary-on_default-disabled,#4d4d4d)}',
@@ -2436,6 +2441,421 @@
         return item;
     }
 
+    // ---- «Мне нравится [F_ckCensor]»: лайки без цензуры на телефоне ----
+    // Плейлист в аккаунте: «Мне нравится» в том же порядке, но треки с заменой — своими загрузками
+    // (функция Яндекса «загрузить трек»: файл хранится в аккаунте и играет на всех устройствах,
+    // слушать его может только владелец). Загруженное запоминаем: повтор только догружает новое
+    const UGC_PL_TITLE = 'Мне нравится (*)';
+    const UGC_MAP_KEY = 'fkc-ugc-map';
+    const UGC_PL_KEY = 'fkc-ugc-playlist';
+    const FORM = { 'content-type': 'application/x-www-form-urlencoded' };
+    const formBody = (o) => Object.entries(o).map(([k, v]) => k + '=' + encodeURIComponent(v)).join('&');
+
+    async function apiJSON(path, init) {
+        const r = await apiFetch(path, init);
+        let j = null;
+        try { j = await r.json(); } catch (_) {}
+        if (!r.ok) throw new Error((j && j.error && (j.error.message || j.error.name)) || ('Яндекс ответил ' + r.status));
+        return resultOf(j);
+    }
+    function ugcMap() { try { return JSON.parse(localStorage.getItem(UGC_MAP_KEY) || '{}') || {}; } catch (_) { return {}; } }
+    function saveUgcMap(m) { try { localStorage.setItem(UGC_MAP_KEY, JSON.stringify(m)); } catch (_) {} }
+
+    // плейлист сборки (key — «likes» или «album:<id>»): запомненный, иначе по названию, иначе новый приватный
+    const UGC_PLS_KEY = 'fkc-ugc-playlists';
+    const UGC_COVERS_KEY = 'fkc-ugc-covers'; // какая обложка поставлена плейлисту (ключ сборки → coverUri)
+    function ugcPlaylistKinds() {
+        let m = {};
+        try { m = JSON.parse(localStorage.getItem(UGC_PLS_KEY) || '{}') || {}; } catch (_) {}
+        try { const old = Number(localStorage.getItem(UGC_PL_KEY)); if (old && !m.likes) m.likes = old; } catch (_) {}
+        return m;
+    }
+    async function ugcPlaylist(uid, key, title) {
+        const lists = await apiJSON('users/' + uid + '/playlists/list');
+        const kinds = ugcPlaylistKinds();
+        let pl = (lists || []).find((x) => kinds[key] && x.kind === kinds[key]) || (lists || []).find((x) => x.title === title);
+        if (!pl) {
+            pl = await apiJSON('users/' + uid + '/playlists/create', { method: 'POST', headers: FORM, body: formBody({ title, visibility: 'private' }) });
+        } else if (pl.title !== title) {
+            try { pl = await apiJSON('users/' + uid + '/playlists/' + pl.kind + '/name', { method: 'POST', headers: FORM, body: formBody({ value: title }) }); } catch (_) {}
+        }
+        kinds[key] = pl.kind;
+        try { localStorage.setItem(UGC_PLS_KEY, JSON.stringify(kinds)); } catch (_) {}
+        return pl;
+    }
+    const getPlaylist = async (uid, kind) => apiJSON('users/' + uid + '/playlists/' + kind + '?_t=' + Date.now());
+
+    // обложка — jpeg не больше size px (обложки бывают png на несколько мегабайт)
+    async function jpegCover(url, size) {
+        const src = await fetch(url).then((r) => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.blob(); });
+        const img = await createImageBitmap(src);
+        const k = Math.min(1, size / Math.max(img.width, img.height));
+        const c = document.createElement('canvas');
+        c.width = Math.max(1, Math.round(img.width * k));
+        c.height = Math.max(1, Math.round(img.height * k));
+        const g = c.getContext('2d');
+        g.fillStyle = '#000';
+        g.fillRect(0, 0, c.width, c.height);
+        g.drawImage(img, 0, 0, c.width, c.height);
+        img.close();
+        return new Promise((res, rej) => c.toBlob((b) => (b ? res(b) : rej(new Error('обложка не сжалась'))), 'image/jpeg', 0.9));
+    }
+
+    // ID3v2.3 для mp3: название, исполнитель и обложка. Яндекс берёт обложку загруженного трека
+    // из тегов файла — отдельно её не поставить. Файл, где картинка уже есть, не трогаем
+    const id3Size = (b, i) => ((b[i] & 127) << 21) | ((b[i + 1] & 127) << 14) | ((b[i + 2] & 127) << 7) | (b[i + 3] & 127);
+    const ascii = (t) => Uint8Array.from(t, (ch) => ch.charCodeAt(0) & 255);
+    function utf16Text(t) {
+        // кодировка 1 (UTF-16 с BOM), как пишут ID3v2.3
+        const out = new Uint8Array(3 + t.length * 2);
+        out[0] = 1; out[1] = 255; out[2] = 254;
+        for (let i = 0; i < t.length; i++) { const c = t.charCodeAt(i); out[3 + i * 2] = c & 255; out[4 + i * 2] = c >> 8; }
+        return out;
+    }
+    function id3Frame(id, data) {
+        const f = new Uint8Array(10 + data.length);
+        f.set(ascii(id), 0);
+        f[4] = (data.length >>> 24) & 255; f[5] = (data.length >>> 16) & 255; f[6] = (data.length >>> 8) & 255; f[7] = data.length & 255;
+        f.set(data, 10);
+        return f;
+    }
+    const concatBytes = (parts) => {
+        const out = new Uint8Array(parts.reduce((n, x) => n + x.length, 0));
+        let o = 0;
+        for (const x of parts) { out.set(x, o); o += x.length; }
+        return out;
+    };
+    async function withCover(blob, item) {
+        if (!item.cover) return blob;
+        const b = new Uint8Array(await blob.arrayBuffer());
+        let audio = 0;
+        if (b[0] === 73 && b[1] === 68 && b[2] === 51) { // «ID3»
+            const end = 10 + id3Size(b, 6) + ((b[5] & 16) ? 10 : 0);
+            // картинка в тегах уже есть — оставляем файл как есть
+            const tag = b.subarray(0, Math.min(end, b.length));
+            for (let i = 10; i + 4 < tag.length; i++) if (tag[i] === 65 && tag[i + 1] === 80 && tag[i + 2] === 73 && tag[i + 3] === 67) return blob;
+            audio = end;
+        } else if (!(b[0] === 255 && (b[1] & 224) === 224)) {
+            return blob; // не mp3 (flac, m4a) — теги другие, не трогаем
+        }
+        const jpg = new Uint8Array(await (await jpegCover(item.cover, 800)).arrayBuffer());
+        const apic = concatBytes([Uint8Array.of(0), ascii('image/jpeg'), Uint8Array.of(0, 3, 0), jpg]);
+        const frames = concatBytes([id3Frame('TIT2', utf16Text(item.title)), item.artist ? id3Frame('TPE1', utf16Text(item.artist)) : new Uint8Array(0), id3Frame('APIC', apic)]);
+        const n = frames.length;
+        const head = Uint8Array.of(73, 68, 51, 3, 0, 0, (n >>> 21) & 127, (n >>> 14) & 127, (n >>> 7) & 127, n & 127);
+        return new Blob([head, frames, b.subarray(audio)], { type: 'audio/mpeg' });
+    }
+
+    async function uploadUgc(uid, kind, item) {
+        let blob = await fetch(item.url).then((r) => { if (!r.ok) throw new Error('файл не скачался: ' + r.status); return r.blob(); });
+        try { blob = await withCover(blob, item); } catch (_) {} // без обложки — всё равно загружаем
+        const name = ((item.artist ? item.artist + ' - ' : '') + item.title).replace(/[/:*?"<>|]/g, ' ').slice(0, 120) + '.mp3';
+        const target = await apiJSON('loader/upload-url?' + formBody({ uid, 'playlist-id': uid + ':' + kind, path: name }), { method: 'POST' });
+        if (target && target.result === 'TOO_MANY_FILES') throw Object.assign(new Error('Яндекс не даёт загрузить больше треков'), { tooMany: true });
+        if (!target || !target['post-target'] || !target['ugc-track-id']) throw new Error('Яндекс не дал адрес для загрузки');
+        const fd = new FormData();
+        fd.append('file', new File([blob], name, { type: blob.type || 'audio/mpeg' }));
+        const up = await fetch(target['post-target'], { method: 'POST', body: fd });
+        if (!up.ok) throw new Error('загрузка не прошла: ' + up.status);
+        const id = String(target['ugc-track-id']);
+        // название и исполнитель — без цензуры, как в программе (теги файла бывают другими)
+        try {
+            await apiFetch('ugc/tracks/' + id + '/change', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ title: item.title, artist: item.artist }) });
+        } catch (_) {}
+        return id;
+    }
+
+    // источники сборки: «Мне нравится» и альбом. Возвращают треки по порядку: { id, albumId, dto }
+    async function likesSource(uid) {
+        // через подмену: в ответ уже вернутся удалённые и свои лайки, на своих местах
+        const lk = await apiJSON('users/' + uid + '/playlists/3?richTracks=true&_t=' + Date.now());
+        const entries = (lk && lk.tracks) || [];
+        const missing = entries.filter((e) => e && (!e.track || !e.track.title)).map((e) => String(idOf(e)));
+        const fetched = new Map();
+        for (let i = 0; i < missing.length; i += 100) {
+            try { for (const d of await fetchTracks(missing.slice(i, i + 100))) if (d) fetched.set(String(idOf(d)), d); } catch (_) {}
+        }
+        return entries.map((e) => {
+            const id = String(idOf(e));
+            const dto = fetched.get(id) || e.track || {};
+            return { id, albumId: e.albumId || (dto.albums && dto.albums[0] && dto.albums[0].id), dto };
+        });
+    }
+    async function albumSource(albumId) {
+        const al = await apiJSON('albums/' + albumId + '/with-tracks?_t=' + Date.now());
+        const out = [];
+        for (const vol of (al && al.volumes) || []) for (const t of vol) if (t) out.push({ id: String(idOf(t)), albumId: String(albumId), dto: t });
+        // у альбома, которого нет в яндекс музыке, в трек-листе бывают только id — данные треков отдельно
+        const bare = out.filter((x) => !x.dto || !x.dto.title).map((x) => x.id);
+        const full = new Map();
+        for (let i = 0; i < bare.length; i += 100) {
+            try { for (const d of await fetchTracks(bare.slice(i, i + 100))) if (d) full.set(String(idOf(d)), d); } catch (_) {}
+        }
+        for (const x of out) if (full.has(x.id)) x.dto = full.get(x.id);
+        return { title: (al && al.title) || 'Альбом', tracks: out, cover: (al && (al.coverUri || al.ogImage)) || '' };
+    }
+
+    // какие загрузки ещё живы: яндекс отдаёт трек, а удалённый — с ошибкой
+    async function aliveUgc(ids) {
+        const alive = new Map(); // id загрузки → { title, artist } как сейчас в яндексе
+        for (let i = 0; i < ids.length; i += 100) {
+            try {
+                const r = await apiJSON('tracks?track-ids=' + ids.slice(i, i + 100).join(','));
+                for (const t of r || []) {
+                    if (t && !t.error && t.id) alive.set(String(t.id), { title: t.title || '', artist: (t.artists || []).map((a) => a && a.name).filter(Boolean).join(', ') });
+                }
+            } catch (_) {}
+        }
+        return alive;
+    }
+
+    // сборка плейлиста key/title из треков source; step — подписи хода работы
+    async function buildUncensored(uid, key, title, source, step, plCover) {
+        const items = [];
+        let skipped = 0;
+        for (const x of source) {
+            const url = getReplacementUrl(x.id);
+            const dto = x.dto || {};
+            if (url) {
+                const name = (dto.title || '') + (dto.version ? ' (' + dto.version + ')' : '');
+                const artist = (dto.artists || []).map((a) => a && a.name).filter(Boolean).join(', ');
+                const cu = dto.coverUri || dto.ogImage || (dto.albums && dto.albums[0] && dto.albums[0].coverUri) || plCover || '';
+                items.push({ ugc: true, src: x.id, url, title: name || 'Без названия', artist, cover: cu ? coverUrl(cu, '800x800') : '' });
+            } else if (isCustomId(x.id)) {
+                skipped++; // свой трек без файла — играть нечем
+            } else {
+                items.push({ id: x.id, albumId: x.albumId ? String(x.albumId) : undefined });
+            }
+        }
+        step('готовлю плейлист…');
+        const pl = await ugcPlaylist(uid, key, title);
+
+        // загрузки общие для всех плейлистов: уже загруженное и живое кладём без новой загрузки
+        const map = ugcMap();
+        const ugcItems = items.filter((x) => x.ugc);
+        const known = ugcItems.map((x) => map[x.src]).filter((m) => m && m.ugc).map((m) => m.ugc);
+        const alive = await aliveUgc([...new Set(known)]);
+        let uploaded = 0, reused = 0, failed = 0, done = 0;
+        let stop = null;
+        const queue = ugcItems.slice();
+        const worker = async () => {
+            while (queue.length && !stop) {
+                const it = queue.shift();
+                const m = map[it.src];
+                if (m && m.url === it.url && alive.has(m.ugc)) {
+                    it.id = m.ugc;
+                    reused++;
+                    // название или исполнитель не те (например, загрузили «Без названия») — поправляем
+                    const now = alive.get(m.ugc);
+                    if (now.title !== it.title || now.artist !== it.artist) {
+                        try {
+                            await apiFetch('ugc/tracks/' + m.ugc + '/change', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ title: it.title, artist: it.artist }) });
+                        } catch (_) {}
+                    }
+                } else {
+                    try {
+                        it.id = await uploadUgc(uid, pl.kind, it);
+                        map[it.src] = { ugc: it.id, url: it.url };
+                        saveUgcMap(map);
+                        uploaded++;
+                    } catch (e) {
+                        if (e.tooMany) stop = e;
+                        failed++;
+                    }
+                }
+                done++;
+                step('загружаю треки без цензуры: ' + done + ' из ' + ugcItems.length);
+            }
+        };
+        await Promise.all([worker(), worker()]);
+
+        // порядок — как в источнике
+        const want = items.filter((x) => x.id).map((x) => (x.albumId ? { id: x.id, albumId: x.albumId } : { id: x.id }));
+        let cur = await getPlaylist(uid, pl.kind);
+        const curIds = (cur.tracks || []).map((e) => String(idOf(e)));
+        if (curIds.join(',') !== want.map((x) => x.id).join(',')) {
+            step('расставляю треки по порядку…');
+            const change = async (diff) => {
+                cur = await apiJSON('users/' + uid + '/playlists/' + pl.kind + '/change-relative', {
+                    method: 'POST', headers: FORM, body: formBody({ diff: JSON.stringify(diff), revision: cur.revision }),
+                });
+            };
+            if (curIds.length) {
+                await change([{ op: 'delete', from: 0, to: curIds.length, tracks: (cur.tracks || []).map((e) => (e.albumId ? { id: String(idOf(e)), albumId: String(e.albumId) } : { id: String(idOf(e)) })) }]);
+            }
+            for (let i = 0; i < want.length; i += 200) {
+                await change([{ op: 'insert', at: i, tracks: want.slice(i, i + 200) }]);
+                step('расставляю треки по порядку: ' + Math.min(i + 200, want.length) + ' из ' + want.length);
+            }
+        }
+        // обложка плейлиста — обложка альбома; ставим, если её нет или обложка альбома сменилась
+        if (plCover) {
+            const covers = (() => { try { return JSON.parse(localStorage.getItem(UGC_COVERS_KEY) || '{}') || {}; } catch (_) { return {}; } })();
+            if (covers[key] !== plCover) {
+                step('ставлю обложку плейлиста…');
+                try {
+                    const fd = new FormData();
+                    fd.append('image', await jpegCover(coverUrl(plCover, '1000x1000'), 1000), 'cover.jpg');
+                    const r = await apiFetch('users/' + uid + '/playlists/' + pl.kind + '/cover/upload', { method: 'POST', body: fd });
+                    if (r.ok) {
+                        covers[key] = plCover;
+                        try { localStorage.setItem(UGC_COVERS_KEY, JSON.stringify(covers)); } catch (_) {}
+                    }
+                } catch (_) {}
+            }
+        }
+        return { total: want.length, ugc: ugcItems.length - failed, uploaded, reused, failed, skipped, stop: stop && stop.message, uuid: pl.playlistUuid, kind: pl.kind };
+    }
+
+    // what: { likes: true } или { albumId }
+    function openUncensoredDialog(what) {
+        ensureDialogCss();
+        const existing = document.querySelector('.fkc-overlay');
+        if (existing) existing.remove();
+        const overlay = el('div', 'fkc-overlay');
+        const dlg = el('div', 'fkc-dialog fkc-narrow');
+        overlay.appendChild(dlg);
+        const head = el('div', 'fkc-head');
+        head.appendChild(el('h2', 'fkc-h', what.albumId ? 'Альбом без цензуры' : 'Мне нравится без цензуры'));
+        const close = el('button', 'fkc-x');
+        close.setAttribute('aria-label', 'Закрыть');
+        close.appendChild(spriteIcon('close_xs'));
+        head.appendChild(close);
+        dlg.appendChild(head);
+        // название плейлиста: у альбома — его название (подменённое, как на странице)
+        const plName = el('b', null, what.albumId ? '…' : UGC_PL_TITLE);
+        const intro = el('div', 'fkc-text');
+        intro.appendChild(document.createTextNode('В вашей Яндекс Музыке появится плейлист «'));
+        intro.appendChild(plName);
+        intro.appendChild(document.createTextNode(what.albumId
+            ? '» — этот альбом без цензуры. Его можно слушать и на телефоне.'
+            : '» — ваши лайки без цензуры. Его можно слушать и на телефоне.'));
+        dlg.appendChild(intro);
+        if (what.albumId) {
+            apiJSON('albums/' + what.albumId).then((al) => { plName.textContent = ((al && al.title) || 'Альбом') + ' (*)'; })
+                .catch(() => { plName.textContent = 'Альбом (*)'; });
+        }
+        dlg.appendChild(el('div', 'fkc-text', 'Плейлист видите только вы. Если что-то добавится, нажмите «Собрать» ещё раз — плейлист обновится.'));
+        const status = el('div', 'fkc-text', '');
+        status.hidden = true;
+        dlg.appendChild(status);
+        const foot = el('div', 'fkc-pair');
+        const cancel = el('button', 'fkc-btn fkc-secondary', 'Отмена');
+        const go = el('button', 'fkc-btn fkc-primary', 'Собрать');
+        foot.appendChild(cancel);
+        foot.appendChild(go);
+        dlg.appendChild(foot);
+        let busy = false;
+        const shut = () => { if (!busy) overlay.remove(); };
+        close.addEventListener('click', shut);
+        cancel.addEventListener('click', shut);
+        overlay.addEventListener('click', (e) => { if (e.target === overlay) shut(); });
+        go.addEventListener('click', async () => {
+            if (busy) return;
+            busy = true;
+            go.disabled = true;
+            try {
+                status.hidden = false;
+                cancel.disabled = true;
+                const step = (t) => { status.textContent = t; };
+                const uid = await selfUid();
+                if (!uid) throw new Error('не удалось узнать аккаунт');
+                let r;
+                if (what.albumId) {
+                    step('читаю альбом…');
+                    const al = await albumSource(what.albumId);
+                    r = await buildUncensored(uid, 'album:' + what.albumId, al.title + ' (*)', al.tracks, step, al.cover);
+                } else {
+                    step('читаю «Мне нравится»…');
+                    r = await buildUncensored(uid, 'likes', UGC_PL_TITLE, await likesSource(uid), step);
+                }
+                status.textContent = 'Готово: ' + r.total + ' треков, без цензуры — ' + r.ugc
+                    + (r.uploaded ? ' (загружено сейчас ' + r.uploaded + ')' : '')
+                    + (r.failed ? '. Не загрузилось: ' + r.failed : '')
+                    + (r.stop ? '. ' + r.stop : '')
+                    + (r.skipped ? '. Пропущено своих треков без файла: ' + r.skipped : '') + '.';
+                go.textContent = 'Открыть плейлист';
+                go.disabled = false;
+                cancel.textContent = 'Закрыть';
+                cancel.disabled = false;
+                busy = false;
+                go.onclick = (e) => {
+                    e.stopImmediatePropagation();
+                    overlay.remove();
+                    if (r.uuid && window.next && window.next.router) window.next.router.push('/playlists?playlistUuid=' + r.uuid);
+                };
+            } catch (e) {
+                busy = false;
+                go.disabled = false;
+                cancel.disabled = false;
+                status.textContent = 'Не получилось: ' + (e && e.message);
+            }
+        });
+        document.body.appendChild(overlay);
+    }
+
+    // Кнопка «Собрать без цензуры» (звёздочка, как у заменённых треков) в ряду кнопок шапки
+    // «Мне нравится» и альбома: копия соседней кнопки «…», чтобы выглядела как родная
+    function uncensoredContext() {
+        const q = new URLSearchParams(location.search);
+        if (location.pathname === '/album' && isNum(q.get('albumId') || '')) return { albumId: q.get('albumId') };
+        if (location.pathname.startsWith('/playlists') && (q.get('playlistUuid') || '').startsWith('lk.')) return { likes: true };
+        return null;
+    }
+    function asteriskIcon(cls) {
+        const svg = document.createElementNS(SVG_NS, 'svg');
+        if (cls) svg.setAttribute('class', cls);
+        svg.setAttribute('viewBox', '0 0 16 16');
+        svg.setAttribute('fill', 'none');
+        svg.setAttribute('aria-hidden', 'true');
+        const path = document.createElementNS(SVG_NS, 'path');
+        path.setAttribute('d', 'M8 2.5v11M3.2 5.25l9.6 5.5M3.2 10.75l9.6-5.5');
+        path.setAttribute('stroke', 'currentColor');
+        path.setAttribute('stroke-width', '1.6');
+        path.setAttribute('stroke-linecap', 'round');
+        svg.appendChild(path);
+        return svg;
+    }
+    function injectUncensoredButton() {
+        const ctx = uncensoredContext();
+        const old = document.querySelector('[data-fkc-ugc-btn]');
+        if (!ctx) { if (old) old.remove(); return; }
+        const menuBtn = document.querySelector('[data-test-id="ALBUM_HEADER_CONTEXT_MENU_BUTTON"], [data-test-id="PLAYLIST_HEADER_CONTEXT_MENU_BUTTON"]');
+        if (!menuBtn) return;
+        const wrap = menuBtn.parentElement;
+        const controls = wrap && wrap.parentElement;
+        if (!controls) return;
+        if (old && controls.contains(old)) return;
+        if (old) old.remove();
+        const clone = wrap.cloneNode(true);
+        clone.setAttribute('data-fkc-ugc-btn', '');
+        const btn = clone.querySelector('button') || clone;
+        for (const a of ['id', 'data-test-id', 'aria-expanded', 'aria-haspopup', 'aria-controls']) btn.removeAttribute(a);
+        btn.setAttribute('aria-label', 'Собрать без цензуры');
+        btn.title = 'Собрать без цензуры — плейлист для телефона';
+        const oldIcon = btn.querySelector('svg');
+        if (oldIcon) oldIcon.replaceWith(asteriskIcon(oldIcon.getAttribute('class')));
+        btn.addEventListener('click', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            const now = uncensoredContext();
+            if (now) openUncensoredDialog(now);
+        }, true);
+        controls.appendChild(clone);
+    }
+
+    function injectPlaylistMenus() {
+        document.querySelectorAll('[data-test-id="PLAYLIST_CONTEXT_MENU"]').forEach((menu) => {
+            if (menu.querySelector('[data-fkc-menuitem]')) return;
+            // только у своего «Мне нравится»
+            if (!location.pathname.startsWith('/playlists') || !(new URLSearchParams(location.search).get('playlistUuid') || '').startsWith('lk.')) return;
+            const items = [...menu.querySelectorAll('[role="menuitem"], [role="menuitemcheckbox"]')];
+            if (!items.length) return;
+            const item = makeMenuItem(items, 'Собрать без цензуры', () => openUncensoredDialog({ likes: true }));
+            items[items.length - 1].after(item);
+        });
+    }
+
     function injectAlbumMenus() {
         document.querySelectorAll('[data-test-id="ALBUM_CONTEXT_MENU"]').forEach((menu) => {
             if (menu.querySelector('[data-fkc-menuitem]')) return;
@@ -2445,8 +2865,11 @@
             const albumId = albumIdForMenu(menu);
             if (!albumId || !isNum(albumId)) return;
             const item = makeMenuItem(items, 'Подменить альбом', () => openAlbumDialog(albumId));
+            // плейлист «Альбом (*)» без цензуры — играет и на телефоне
+            const ugcItem = makeMenuItem(items, 'Собрать без цензуры', () => openUncensoredDialog({ albumId }));
             const last = items[items.length - 1];
             last.parentElement.insertBefore(item, last);
+            last.parentElement.insertBefore(ugcItem, last);
         });
     }
 
